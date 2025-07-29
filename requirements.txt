@@ -1,0 +1,7 @@
+streamlit
+google-generativeai
+yt-dlp
+openai-whisper
+pandas
+python-dotenv
+ffmpeg-python
