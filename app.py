@@ -264,11 +264,35 @@ with tab2:
 
     def analyze_viral_patterns(transcripts_str, model_name):
         prompt = f"""
-        You are an expert viral video analyst and YouTube Shorts strategist. Your mission is to deconstruct the mechanics of the successful YouTube Shorts provided below... (Your full prompt is here)
-        ...
-        TRANSCRIPTS FOR ANALYSIS:
-        {transcripts_str}
-        """
+        Analyzes a string of transcripts to find viral patterns."""
+        prompt = f"""
+You are an expert viral video analyst and YouTube Shorts strategist. Your mission is to deconstruct the mechanics of the successful YouTube Shorts provided below, based on their full transcripts. Produce a two-part strategic report. Your analysis must be sharp, insightful, and move beyond surface-level observations.
+
+**PART 1: INDIVIDUAL VIDEO DECONSTRUCTION**
+
+For each of the YouTube Short transcripts provided, provide a detailed analysis covering these specific points:
+
+* **Core Concept & Hook:** Based on the transcript, what is the video's one-sentence idea? What is the verbal hook in the first few lines that grabs the listener?
+* **Emotional Driver:** What is the primary emotion the transcript's language and story triggers? (e.g., Curiosity, Humor, Awe, Relatability, FOMO, Anger). Why is this emotion powerful for sharing?
+* **Storytelling & Pacing:** Analyze the transcript's structure. Is it a fast-paced list? A slow-burn story? How does the language create pace and retain attention?
+* **Value Proposition:** What value does the viewer get from this content? (e.g., a new insight, a quick laugh, a solution to a problem).
+* **Unique Differentiator:** What is it about the message or the way it's phrased in the transcript that makes it stand out?
+
+**PART 2: SYNTHESIZED PATTERNS & ACTIONABLE BLUEPRINT**
+
+After analyzing all transcripts, synthesize your findings into a summary report:
+
+* **Common Patterns:** What are the most frequent patterns you observed across all transcripts in terms of narrative structure, topic, language style, or hook formulas?
+* **Emerging Trends:** Do these patterns point to a larger, emerging content trend on YouTube Shorts right now?
+* **Actionable Blueprint:** Based on your complete analysis, provide a step-by-step blueprint for scripting a new, potentially viral short.
+* **Key Takeaways:** What are the top 3-5 takeaways that any content creator should apply to their next YouTube Short based on these transcripts?
+* **IMPORTANT:** Do not include any introductory or concluding text outside the analysis sections. Focus solely on the analysis and actionable insights.
+* **Important:** list down all the parameters you found common in the transcripts (e.g. emotional driver, storytelling, value proposition, etc.) in a bullet point list.
+
+**TRANSCRIPTS FOR ANALYSIS:**
+{transcripts_str}
+"""
+
         try:
             model = genai.GenerativeModel(model_name)
             response = model.generate_content(prompt)
