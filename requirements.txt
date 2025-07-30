@@ -1,6 +1,6 @@
 streamlit
 google-generativeai
-yt-dlp
+yt-dlp --upgrade
 openai-whisper
 pandas
 python-dotenv
