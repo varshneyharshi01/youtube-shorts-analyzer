@@ -117,11 +117,11 @@ def analyze_transcript_for_clips(chunk, model_name, num_clips):
     **COLUMN DEFINITIONS AND EXAMPLES:**
     1.  **`Timestamp`**: The start and end time of the clip from the transcript.
     2.  **`Duration`**: The calculated raw duration of the clip in seconds.
-    3.  **`Clip Title 1`, `Clip Title 2`, `Clip Title 3`**: Three short, catchy, and SEO-friendly titles.
-    4.  **`Content Focus`**: A one-sentence summary of the clip's core message.
+    3.  **`Strategy`**: A one line explaination how that short can be made so it can give potential (for example: "Start with the direct question "Do you actually get people to fear you?" and emphasize the secretive life aspect.").
+    4.  **`Why it works`**: An explaination why that suggested clip will work (for example, "Fear of Mentalists: Highlights the intriguing and slightly intimidating nature of being a mentalist. Intriguing and personal.").
     5.  **`Pacing/Editing Notes`**: Specific, actionable editing advice.
-    6.  **`Hook / Opening Line`**: The exact first sentence from the transcript.
-    7.  **`Success Potential`**: A rating (Very High, High, Medium) followed by a justification.
+    6.  **`Hook / Opening Line`**: The exact first sentence from the transcript (for example, ""People are scared of me because I'm a mentalist... I live a very secretive life. #Mentalist #Magic")
+    7.  **`Success Potential`**: A rating (Very High, High, Medium) followed by a justification (for example, "High: Creates curiosity, plays on common perceptions of mentalists, and includes a strong, somewhat mysterious personal statement.")
 
     **FINAL RULE:**
     Sort the final table by the `Timestamp` column in ascending order (from earliest to latest).
@@ -171,79 +171,83 @@ if 'transcript' not in st.session_state:
 tab1, tab2, tab3, tab4 = st.tabs(["🎬 Generate Clips", "🕵️‍♀️ Analyze Patterns", "✍️ Generate Titles", "💡 Headers Generator"])
 
 # --- TAB 1: GENERATE CLIPS (MERGED) ---
+# --- TAB 1: GENERATE CLIPS ---
 with tab1:
     st.header("Generate Clip Ideas from a Transcript")
-    # A radio button to choose the input method
+    
+    # Let the user choose how to provide the transcript
     input_method = st.radio(
         "Choose transcript source:",
         ("From YouTube URL", "From File Upload"),
-        horizontal=True
+        horizontal=True,
+        key="clip_gen_source"
     )
 
+    # --- UI for YouTube URL Input ---
     if input_method == "From YouTube URL":
-        st.subheader("Analyze from a YouTube Video")
         video_url = st.text_input("Enter YouTube Video URL", placeholder="e.g., https://www.youtube.com/watch?v=...")
-        if st.button("Generate Transcript", key="generate_transcript_btn"):
+        if st.button("Generate Transcript from URL", key="generate_transcript_btn"):
             if video_url:
+                # Call the transcription function
                 transcript_text = transcribe_audio_with_whisper(video_url)
                 if transcript_text:
                     st.session_state['transcript'] = transcript_text
-                    st.success("Transcript generated successfully! ✅")
+                    st.success("Transcript generated successfully!")
                     st.rerun() # Refresh the app to show the analysis section
             else:
-                st.warning("Please enter a YouTube URL first.")
+                st.warning("Please enter a YouTube URL.")
 
-    elif input_method == "From File Upload":
-        st.subheader("Analyze from a Transcript File")
-        uploaded_file = st.file_uploader(
-            "Choose a .txt or .srt file",
-            type=['txt', 'srt'],
-            help="Upload a plain text or SubRip subtitle file."
-        )
-        if uploaded_file is not None:
-            transcript_text = uploaded_file.getvalue().decode("utf-8")
-            st.session_state['transcript'] = transcript_text
+    # --- UI for File Upload Input ---
+    else: # input_method == "From File Upload"
+        uploaded_file = st.file_uploader("Choose a .txt or .srt file", type=['txt', 'srt'], key="clip_gen_uploader")
+        if uploaded_file:
+            st.session_state['transcript'] = uploaded_file.getvalue().decode("utf-8")
             st.success(f"Successfully loaded `{uploaded_file.name}`")
-            st.rerun() # Refresh the app to show the analysis section
+            # The UI will update automatically below once the session state is set.
 
-    # The analysis section now appears ONLY inside Tab 1 and ONLY after a transcript is loaded.
-    if st.session_state['transcript']:
+    # --- Analysis Section (Appears only after a transcript is loaded) ---
+    if st.session_state.get('transcript'):
         st.markdown("---")
-        st.subheader("Analyze the Loaded Transcript")
+        st.info("✅ Transcript loaded. Configure the analysis below and click the 'Find Clip Ideas' button.")
+        
         with st.expander("View Full Transcript"):
-            st.text_area("Transcript", st.session_state['transcript'], height=300)
+            st.text_area("Transcript Content", st.session_state['transcript'], height=300, key="transcript_display")
 
         st.markdown("---")
         st.subheader("Analysis Configuration")
+
         col1, col2 = st.columns(2)
         with col1:
-            num_clips = st.number_input("Number of clip suggestions", min_value=5, max_value=50, value=10, step=5)
+            num_clips = st.number_input("Number of clip ideas", min_value=3, max_value=50, value=7, step=1, key="num_clips_input")
         with col2:
-            model_choice = st.selectbox(
-                "Choose Gemini Model",
+            model_choice_t1 = st.selectbox(
+                "Choose Model",
                 ("gemini-1.5-flash-latest", "gemini-1.5-pro-latest"),
-                index=0,
-                help="Flash is faster, Pro is more powerful. Start with Flash."
+                key="model_choice_t1",
+                help="Flash is faster, Pro provides more detailed analysis."
             )
-        if st.button("✨ Analyze Transcript", key="analyze_btn", type="primary"):
-            with st.spinner(f"Gemini is analyzing the transcript..."):
-                raw_table = analyze_transcript_for_clips(st.session_state.transcript, model_choice, num_clips)
+        
+        if st.button("✨ Find Clip Ideas", type="primary", key="analyze_btn_t1"):
+            with st.spinner("Gemini is analyzing the transcript for clips..."):
+                raw_table = analyze_transcript_for_clips(st.session_state.transcript, model_choice_t1, num_clips)
+            
             if raw_table:
                 df = parse_markdown_table(raw_table)
                 if not df.empty:
                     st.success("Analysis Complete!")
                     st.dataframe(df, use_container_width=True)
+                    # Offer CSV download
                     csv = df.to_csv(index=False).encode('utf-8')
                     st.download_button(
                         label="Download Analysis as CSV",
                         data=csv,
-                        file_name="gemini_shorts_analysis.csv",
+                        file_name="clip_analysis.csv",
                         mime="text/csv",
                     )
                 else:
-                    st.error("Analysis finished, but no valid data was returned from the model.")
+                    st.error("Analysis finished, but no valid clip data was found in the response.")
             else:
-                st.error("Analysis failed. No response from the model.")
+                st.error("Analysis failed. No response was received from the model.")
 
 # --- TAB 2: ANALYZE PATTERNS (Previously Tab 3) ---
 with tab2:
