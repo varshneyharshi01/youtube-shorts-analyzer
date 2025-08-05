@@ -8,6 +8,9 @@ from datetime import timedelta
 import yt_dlp
 import whisper
 import pandas as pd
+import tempfile
+from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 
 # --- Page Configuration and Minor Style Polish ---
 st.set_page_config(layout="wide")
@@ -104,7 +107,7 @@ def analyze_transcript_for_clips(chunk, model_name, num_clips):
     """
     prompt = f"""
     ROLE AND GOAL:
-    You are an Expert YouTube Content Strategist and Video Editor, specializing in creating viral short-form content. Your primary goal is to analyze the provided video transcript and identify at least {num_clips} self-contained clips that can be edited into compelling YouTube Shorts.
+    You are an Expert YouTube Content Strategist and Video Editor, specializing in creating viral short-form content. Your primary goal is to analyze the provided video transcript and identify {num_clips} self-contained clips that can be edited into compelling YouTube Shorts.
 
     CONTEXT:
     Your analysis must be sharp, insightful, and directly actionable. The output must be a single Markdown table, and nothing else.
@@ -168,19 +171,53 @@ if 'transcript' not in st.session_state:
 # The old 5 tabs are now 4, with the first two merged.
 # --- TABS DEFINITION (CHANGED) ---
 # The "Trend Analysis" tab is now replaced with "Headers Generator"
-tab1, tab2, tab3, tab4 = st.tabs(["🎬 Generate Clips", "🕵️‍♀️ Analyze Patterns", "✍️ Generate Titles", "💡 Headers Generator"])
+tab1, tab2, tab3, tab4, tab5 = st.tabs(["🎬 Generate Clips", "🕵️‍♀️ Analyze Patterns", "✍️ Generate Titles", "💡 Headers Generator", "🚀 Pre-Upload Review"])
 
-# --- TAB 1: GENERATE CLIPS (MERGED) ---
-# --- TAB 1: GENERATE CLIPS ---
+def select_strongest_clips(clips_markdown, model_name, num_top_clips):
+    """Analyzes a markdown table of clips to select the top N strongest ones, adding justification."""
+    prompt = f"""
+    ROLE AND GOAL:
+    You are an Executive Producer and Viral Content Expert based in Noida. Your goal is to review a pre-analyzed list of potential YouTube Shorts clips and select the top {num_top_clips} clips with the highest probability of going viral.
+
+    CONTEXT:
+    You have been given a list of clips identified by a content strategist. Your job is to perform the final selection, prioritizing clips that are most likely to achieve high engagement, watch time, and shareability.
+
+    INSTRUCTIONS:
+    1.  Carefully review each clip in the provided Markdown table.
+    2.  Evaluate each clip based on its 'Hook', 'Strategy', and 'Why it works' columns.
+    3.  Select the {num_top_clips} clips that are the most emotionally compelling, have the strongest narrative arc, or present the most surprising/valuable information.
+    4.  You must then generate a new Markdown table containing ONLY your top selections.
+    5.  This new table must include all the original columns, plus **three new columns at the beginning**:
+        * **`Rank`**: Your ranking of the clip (1, 2, 3...).
+        * **`Reason for Recommendation`**: A concise, powerful sentence explaining *why this specific clip was chosen over the others*. Focus on its viral potential or emotional impact.
+        * **`Success Potential`**: Your expert rating (e.g., Very High, High, Medium) for the clip's likelihood of going viral.
+    6.  Your final output must be ONLY this new Markdown table and nothing else.
+
+    **List of Clips to Evaluate:**
+    ---
+    {clips_markdown}
+    ---
+    """
+    try:
+        model = genai.GenerativeModel(model_name)
+        response = model.generate_content(prompt)
+        return response.text
+    except Exception as e:
+        st.error(f"An error occurred during strong clip selection: {e}")
+        return None
+    
+# --- TAB 1: GENERATE CLIPS (CORRECTED WORKFLOW) ---
 with tab1:
     st.header("Generate Clip Ideas from a Transcript")
-    
+
     # Let the user choose how to provide the transcript
     input_method = st.radio(
         "Choose transcript source:",
         ("From YouTube URL", "From File Upload"),
         horizontal=True,
-        key="clip_gen_source"
+        key="clip_gen_source",
+        # On change, reset the analysis results
+        on_change=lambda: st.session_state.update(raw_analysis_table=None, strong_clips_table=None)
     )
 
     # --- UI for YouTube URL Input ---
@@ -188,12 +225,13 @@ with tab1:
         video_url = st.text_input("Enter YouTube Video URL", placeholder="e.g., https://www.youtube.com/watch?v=...")
         if st.button("Generate Transcript from URL", key="generate_transcript_btn"):
             if video_url:
-                # Call the transcription function
-                transcript_text = transcribe_audio_with_whisper(video_url)
+                with st.spinner("Generating transcript... This may take a few minutes."):
+                    transcript_text = transcribe_audio_with_whisper(video_url)
                 if transcript_text:
                     st.session_state['transcript'] = transcript_text
                     st.success("Transcript generated successfully!")
-                    st.rerun() # Refresh the app to show the analysis section
+                else:
+                    st.error("Failed to generate transcript. Please check the URL and try again.")
             else:
                 st.warning("Please enter a YouTube URL.")
 
@@ -203,51 +241,95 @@ with tab1:
         if uploaded_file:
             st.session_state['transcript'] = uploaded_file.getvalue().decode("utf-8")
             st.success(f"Successfully loaded `{uploaded_file.name}`")
-            # The UI will update automatically below once the session state is set.
 
     # --- Analysis Section (Appears only after a transcript is loaded) ---
     if st.session_state.get('transcript'):
         st.markdown("---")
-        st.info("✅ Transcript loaded. Configure the analysis below and click the 'Find Clip Ideas' button.")
-        
+        st.info("✅ Transcript loaded. Configure and run the analysis below.")
+
         with st.expander("View Full Transcript"):
             st.text_area("Transcript Content", st.session_state['transcript'], height=300, key="transcript_display")
 
         st.markdown("---")
-        st.subheader("Analysis Configuration")
+        st.subheader("Step 1: Find All Potential Clips")
 
         col1, col2 = st.columns(2)
         with col1:
-            num_clips = st.number_input("Number of clip ideas", min_value=3, max_value=50, value=7, step=1, key="num_clips_input")
+            num_clips = st.number_input("Number of clip ideas to find", min_value=3, max_value=50, value=7, step=1, key="num_clips_input")
         with col2:
             model_choice_t1 = st.selectbox(
                 "Choose Model",
                 ("gemini-1.5-flash-latest", "gemini-1.5-pro-latest"),
                 key="model_choice_t1",
-                help="Flash is faster, Pro provides more detailed analysis."
+                help="Flash is faster. Pro provides more detailed analysis."
             )
-        
+
         if st.button("✨ Find Clip Ideas", type="primary", key="analyze_btn_t1"):
             with st.spinner("Gemini is analyzing the transcript for clips..."):
                 raw_table = analyze_transcript_for_clips(st.session_state.transcript, model_choice_t1, num_clips)
-            
-            if raw_table:
-                df = parse_markdown_table(raw_table)
-                if not df.empty:
-                    st.success("Analysis Complete!")
-                    st.dataframe(df, use_container_width=True)
-                    # Offer CSV download
-                    csv = df.to_csv(index=False).encode('utf-8')
-                    st.download_button(
-                        label="Download Analysis as CSV",
-                        data=csv,
-                        file_name="clip_analysis.csv",
-                        mime="text/csv",
-                    )
-                else:
-                    st.error("Analysis finished, but no valid clip data was found in the response.")
+                # CHANGE: Store result in session state immediately
+                st.session_state['raw_analysis_table'] = raw_table
+                # CHANGE: Reset the 'strong clips' result when a new analysis is run
+                st.session_state['strong_clips_table'] = None
+        
+        # --- Display initial analysis results ---
+        # This block now reads from session_state and will display after the button press completes
+        if 'raw_analysis_table' in st.session_state and st.session_state['raw_analysis_table']:
+            st.success("Analysis Complete! Here are all potential clips.")
+            df = parse_markdown_table(st.session_state['raw_analysis_table'])
+
+            if not df.empty:
+                st.dataframe(df, use_container_width=True)
+                csv = df.to_csv(index=False).encode('utf-8')
+                st.download_button(
+                    label="Download Full Analysis as CSV",
+                    data=csv,
+                    file_name="full_clip_analysis.csv",
+                    mime="text/csv",
+                )
+
+                # --- NEW: Section for selecting strongest clips ---
+                st.markdown("---")
+                st.subheader("Step 2: Select the Strongest Clips for Upload")
+                st.markdown("Now, let the AI act as an Executive Producer to pick the best clips from the list above.")
+
+                col3, col4 = st.columns(2)
+                with col3:
+                    num_top_clips = st.number_input("Number of top clips to select", min_value=1, max_value=10, value=3, key="num_top_clips")
+
+                if st.button("🔥 Find Strongest Clips", key="find_strongest_btn"):
+                    with st.spinner("Producer AI is reviewing the list..."):
+                        strong_clips_result = select_strongest_clips(
+                            st.session_state['raw_analysis_table'],
+                            model_choice_t1,
+                            num_top_clips
+                        )
+                        st.session_state['strong_clips_table'] = strong_clips_result
+
             else:
-                st.error("Analysis failed. No response was received from the model.")
+                st.error("Analysis finished, but no valid clip data was found in the response. The AI may have returned an empty or invalid table.")
+        # This elif handles the case where the analysis was run but failed
+        elif 'raw_analysis_table' in st.session_state and not st.session_state['raw_analysis_table']:
+             st.error("Analysis failed. The model did not return a response. Please try again or check your API key and quota.")
+
+
+        # --- Display the strongest clips table ---
+        if 'strong_clips_table' in st.session_state and st.session_state['strong_clips_table']:
+            st.markdown("---")
+            st.subheader("🏆 Top Recommended Clips")
+            strong_df = parse_markdown_table(st.session_state['strong_clips_table'])
+
+            if not strong_df.empty:
+                st.dataframe(strong_df, use_container_width=True)
+                strong_csv = strong_df.to_csv(index=False).encode('utf-8')
+                st.download_button(
+                    label="Download Top Clips as CSV",
+                    data=strong_csv,
+                    file_name="top_clips.csv",
+                    mime="text/csv",
+                )
+            else:
+                st.warning("The strong clip selection process did not return a valid table.")
 
 # --- TAB 2: ANALYZE PATTERNS (Previously Tab 3) ---
 with tab2:
@@ -586,4 +668,182 @@ with tab4:
                 st.subheader("🚀 Suggested Thumbnail Headers")
                 st.markdown(suggested_headers)
             else:
-                st.error("Header generation failed. No response was received from the model.")
+                st.error("Header generation failed. No response was received from the model.")   
+
+ # --- Helper Functions for Tab 5 ---
+
+@st.cache_resource
+def load_whisper_model():
+    """Loads the Whisper model and caches it."""
+    model = whisper.load_model("base")
+    return model
+
+def transcribe_uploaded_video(video_file_bytes):
+    """Saves uploaded video bytes to a temporary file and transcribes it."""
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.mp4') as tmp:
+            tmp.write(video_file_bytes)
+            temp_video_path = tmp.name
+
+        model = load_whisper_model()
+        result = model.transcribe(temp_video_path, fp16=False)
+        os.remove(temp_video_path)
+        full_text = " ".join([segment['text'].strip() for segment in result['segments']])
+        return full_text
+    except Exception as e:
+        st.error(f"Failed during transcription: {e}")
+        if 'temp_video_path' in locals() and os.path.exists(temp_video_path):
+            os.remove(temp_video_path)
+        return None
+
+def get_pre_upload_feedback(short_transcript, title, header, audience, model_name, long_form_transcript=""):
+    """
+    Generates a comprehensive pre-upload analysis for a YouTube Short,
+    mirroring a detailed, expert review format.
+    """
+
+    long_form_context_block = ""
+    if long_form_transcript:
+        long_form_context_block = f"""
+    **Full Raw Video Transcript (for context):**
+    ---
+    {long_form_transcript}
+    ---
+    """
+
+    # --- MODIFIED PROMPT STARTS HERE ---
+    prompt = f"""
+    ROLE AND GOAL:
+    You are an expert YouTube Content Strategist and Analyst based in Noida, India, with a deep understanding of the YouTube Shorts algorithm as of August 2025. Your goal is to provide a comprehensive review of a short video, analyzing its content's viral potential and then providing actionable advice to maximize its performance.
+
+    CORE TASK:
+    Your primary job is to first analyze the core content for its inherent strengths and weaknesses. Then, based on that analysis, provide specific, actionable advice on how to package and edit the video to amplify its strengths and attract the target audience.
+
+    CONTEXT:
+    - **Proposed Title:** "{title}"
+    - **Target Audience:** "{audience}"
+    - **The Final Short Clip's Transcript:**
+    ---
+    {short_transcript}
+    ---
+    {long_form_context_block}
+
+    INSTRUCTIONS:
+    Generate a detailed report with the following specific sections, in this exact order. Use clear headings and bullet points. Use LaTeX for the rating (e.g., `$8.5/10$`).
+
+    **### Video Analysis & Review**
+    Start with a brief paragraph summarizing the video's content and core message. Then, create two bulleted lists:
+    - **Strengths:** Analyze why the content is compelling. (e.g., "Powerful Hook," "Credible Speaker," "Controversial Topic," etc.)
+    - **Areas for Consideration:** Note any minor weaknesses or points to be aware of. (e.g., "Repurposed Formatting," "Abrupt End," etc.)
+
+    **### Rating**
+    Give the short a rating out of 10, using LaTeX format (`$X/10$`). Briefly justify the score based on your analysis above.
+
+    **### Will This Work for a YouTube Audience?**
+    Provide a clear "Yes," "No," or "It's possible" answer. Follow up with a paragraph explaining the **probability of success**. Explain *why* it will or will not work, referencing the YouTube algorithm, audience psychology, and engagement potential (comments, shares, etc.).
+
+    **### Recommendations for Uploading:**
+    This section is for practical advice.
+    - **Title:** Provide 3 distinct, compelling title options that are SEO-friendly.
+    - **Description:** Write a short, optimized YouTube description.
+    - **Call to Action (CTA):** Suggest a specific question to ask in the description or a pinned comment to drive engagement.
+    - **Hashtags:** Provide 3-5 relevant hashtags.
+
+    **### Conclusion:**
+    End with a short, encouraging summary paragraph about the video's potential.
+    """
+    # --- MODIFIED PROMPT ENDS HERE ---
+
+    try:
+        model = genai.GenerativeModel(model_name)
+        # It's good practice to add safety settings
+        safety_settings = [
+            {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+        ]
+        response = model.generate_content(prompt, safety_settings=safety_settings)
+        return response.text
+    except Exception as e:
+        # Using st.error is specific to Streamlit, which is fine if that's your framework.
+        st.error(f"An error occurred while generating feedback: {e}")
+        return None
+
+                # --- TAB 5: PRE-UPLOAD REVIEW (WITH VIDEO UPLOAD) ---
+# --- TAB 5: PRE-UPLOAD REVIEW (WITH VIDEO UPLOAD) ---
+with tab5:
+    st.subheader("🚀 Get a Final Pre-Upload Review")
+    st.markdown("Upload your final Short video file (.mp4, .mov) and provide its context to get an AI-powered review before you publish.")
+    st.markdown("---")
+
+    st.subheader("Step 1: Upload Your Short Video")
+    uploaded_video = st.file_uploader(
+        "Choose a video file",
+        type=['mp4', 'mov', 'avi', 'mkv'],
+        key="review_video_uploader"
+    )
+
+    # This 'if' block must be INSIDE 'with tab5:'
+    if uploaded_video:
+        # Create columns to control the video's width
+        vid_col1, vid_col2, vid_col3 = st.columns([1, 2, 1])
+
+        # Place the video in the middle column
+        with vid_col2:
+            st.video(uploaded_video)
+        
+        # Continue with the rest of the UI after displaying the video
+        st.markdown("---")
+        st.subheader("Step 2: Provide Your Video's Context")
+
+        col1, col2 = st.columns(2)
+        with col1:
+            review_title = st.text_input("Proposed Title", placeholder="e.g., DON'T Make This Freelance Mistake!", key="review_title")
+        with col2:
+            review_header = st.text_input("Thumbnail Header Text", placeholder="e.g., THE #1 MISTAKE", key="review_header")
+
+        review_audience = st.text_input("Target Audience", placeholder="e.g., Aspiring freelancers in India", key="review_audience")
+        st.markdown("---")
+
+        st.subheader("Step 3: Get Feedback")
+        review_model_choice = st.selectbox(
+            "Choose Gemini Model for Review",
+            ("gemini-1.5-pro-latest", "gemini-1.5-flash-latest"),
+            index=0,
+            help="Pro is highly recommended for nuanced, high-quality feedback.",
+            key="review_model_choice"
+        )
+
+        # This 'if' block must be aligned correctly
+        if st.button("🔬 Analyze and Review Short", type="primary", key="get_review_btn"):
+            if not all([review_title, review_audience]): # Header is optional
+                st.warning("Please fill in the Title and Audience fields for a complete review.")
+            else:
+                review_transcript = None
+                with st.spinner("Transcribing video... This may take a moment."):
+                    # Pass the file's bytes to the transcription function
+                    video_bytes = uploaded_video.getvalue()
+                    review_transcript = transcribe_uploaded_video(video_bytes)
+
+                if review_transcript:
+                    st.success("Transcription complete! Now getting feedback...")
+                    with st.spinner("Your personal strategist is reviewing the content..."):
+                        feedback = get_pre_upload_feedback(
+                            short_transcript=review_transcript,
+                            title=review_title,
+                            header=review_header,
+                            audience=review_audience,
+                            model_name=review_model_choice
+                        )
+
+                    if feedback:
+                        st.markdown("---")
+                        st.subheader("📋 Feedback Report")
+                        st.markdown(feedback)
+                    else:
+                        st.error("The review could not be generated after transcription.")
+                else:
+                    st.error("Could not transcribe the video. The file might be corrupt or contain no audio.")
+
+                    
