@@ -575,25 +575,72 @@ with tab2:
 # --- TAB 3: GENERATE TITLES ---
 with tab3:
     st.subheader("✍️ Generate High-Performing Titles")
-    transcript_input_t3 = st.text_area("Paste your full Short transcript here", height=200, key="transcript_input_tab3")
-    col1, col2 = st.columns(2)
-    audience = col1.text_input("Target Audience", placeholder="e.g., Beginner freelancers")
-    tone = col1.selectbox("Desired Tone", ("Educational", "Bold & Controversial", "Inspirational", "Humorous", "Relatable", "Urgent/Timely", "Intriguing/Mysterious", "Motivational", "Nostalgic/Sentimental", "Aspirational / Luxurious", "Surprising/Unexpected"))
-    takeaway = col2.text_input("Main Takeaway or Message", placeholder="e.g., Build a personal brand to earn more")
-    model_choice_t3 = st.selectbox("Choose Gemini Model", ("gemini-1.5-pro-latest", "gemini-1.5-flash-latest"), key="model_choice_tab3")
     
-    if st.button("💡 Generate Titles", type="primary", key="suggest_titles_btn"):
-        if transcript_input_t3 and audience and takeaway:
-            with st.spinner("Gemini is crafting strategic titles..."):
-                titles = generate_shorts_titles(transcript_input_t3, audience, takeaway, tone, model_choice_t3)
-                if titles:
-                    st.markdown("---")
-                    st.subheader("🔥 Suggested Titles (with Strategy)")
-                    st.markdown(titles)
-                else:
-                    st.error("Title generation failed.")
-        else:
-            st.warning("Please fill in all fields for the best results.")
+    # Input method selection
+    input_method_t3 = st.radio("Choose input method:", ("Upload Video", "Paste Transcript"), horizontal=True, key="title_input_method")
+    
+    if input_method_t3 == "Upload Video":
+        # Video upload section
+        uploaded_video_t3 = st.file_uploader("Choose a video file", type=['mp4', 'mov', 'avi'], key="title_video_uploader")
+        
+        if uploaded_video_t3:
+            # Two-column layout for video and form
+            left_col_t3, right_col_t3 = st.columns([3, 2])
+            
+            with left_col_t3:
+                st.markdown("### 📝 Title Generation Parameters")
+                audience = st.text_input("Target Audience", placeholder="e.g., Beginner freelancers", key="audience_t3")
+                tone = st.selectbox("Desired Tone", ("Educational", "Bold & Controversial", "Inspirational", "Humorous", "Relatable", "Urgent/Timely", "Intriguing/Mysterious", "Motivational", "Nostalgic/Sentimental", "Aspirational / Luxurious", "Surprising/Unexpected"), key="tone_t3")
+                takeaway = st.text_input("Main Takeaway or Message", placeholder="e.g., Build a personal brand to earn more", key="takeaway_t3")
+                model_choice_t3 = st.selectbox("Choose Gemini Model", ("gemini-1.5-pro-latest", "gemini-1.5-flash-latest"), key="model_choice_tab3")
+                
+                if st.button("💡 Generate Titles from Video", type="primary", key="suggest_titles_video_btn"):
+                    if audience and takeaway:
+                        with st.spinner("Transcribing video..."):
+                            video_bytes = uploaded_video_t3.getvalue()
+                            video_transcript = transcribe_uploaded_video(video_bytes)
+                        
+                        if video_transcript:
+                            st.success("Transcription complete! Generating titles...")
+                            with st.spinner("Gemini is crafting strategic titles..."):
+                                titles = generate_shorts_titles(video_transcript, audience, takeaway, tone, model_choice_t3)
+                                if titles:
+                                    st.markdown("---")
+                                    st.subheader("🔥 Suggested Titles (with Strategy)")
+                                    st.markdown(titles)
+                                else:
+                                    st.error("Title generation failed.")
+                        else:
+                            st.error("Could not transcribe the video.")
+                    else:
+                        st.warning("Please fill in Target Audience and Main Takeaway fields.")
+            
+            with right_col_t3:
+                st.markdown("### 📹 Video Preview")
+                st.video(uploaded_video_t3)
+                st.caption(f"📁 {uploaded_video_t3.name}")
+    
+    else:
+        # Transcript input section
+        transcript_input_t3 = st.text_area("Paste your full Short transcript here", height=200, key="transcript_input_tab3")
+        col1, col2 = st.columns(2)
+        audience = col1.text_input("Target Audience", placeholder="e.g., Beginner freelancers", key="audience_t3_text")
+        tone = col1.selectbox("Desired Tone", ("Educational", "Bold & Controversial", "Inspirational", "Humorous", "Relatable", "Urgent/Timely", "Intriguing/Mysterious", "Motivational", "Nostalgic/Sentimental", "Aspirational / Luxurious", "Surprising/Unexpected"), key="tone_t3_text")
+        takeaway = col2.text_input("Main Takeaway or Message", placeholder="e.g., Build a personal brand to earn more", key="takeaway_t3_text")
+        model_choice_t3 = st.selectbox("Choose Gemini Model", ("gemini-1.5-pro-latest", "gemini-1.5-flash-latest"), key="model_choice_tab3_text")
+        
+        if st.button("💡 Generate Titles from Transcript", type="primary", key="suggest_titles_text_btn"):
+            if transcript_input_t3 and audience and takeaway:
+                with st.spinner("Gemini is crafting strategic titles..."):
+                    titles = generate_shorts_titles(transcript_input_t3, audience, takeaway, tone, model_choice_t3)
+                    if titles:
+                        st.markdown("---")
+                        st.subheader("🔥 Suggested Titles (with Strategy)")
+                        st.markdown(titles)
+                    else:
+                        st.error("Title generation failed.")
+            else:
+                st.warning("Please fill in all fields for the best results.")
 
 # --- TAB 4: HEADERS GENERATOR ---
 with tab4:
