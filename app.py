@@ -36,7 +36,7 @@ except Exception as e:
 
 # --- Main App Title ---
 st.title("YouTube Shorts Analyzer 🤖")
-st.markdown("Your all-in-one toolkit for creating, reviewing, and diagnosing YouTube Shorts.")
+st.markdown("Create your content plan in minutes.")
 
 # ##############################################################################
 # --- GLOBAL HELPER FUNCTIONS ---
@@ -54,20 +54,99 @@ def format_timestamp(seconds):
     milliseconds = int(td.microseconds / 1000)
     return f"{hours:02}:{minutes:02}:{seconds:02},{milliseconds:03}"
 
+def handle_youtube_format_issues(url):
+    """Provides specific guidance for common YouTube format issues."""
+    st.error("🚫 **YouTube Format Issue Detected**")
+    st.markdown("""
+    **The Problem:** This video has format restrictions that prevent audio extraction.
+    
+    **Common Causes:**
+    - Video is part of a playlist with restricted formats
+    - Video has age restrictions or region blocks
+    - YouTube has changed their format availability
+    - Video uses newer codecs not supported by yt-dlp
+    
+    **Solutions to Try:**
+    1. **Use File Upload Instead** - Upload the video file directly (recommended)
+    2. **Try Different Video** - Test with another YouTube video
+    3. **Check Video Settings** - Ensure the video is public and accessible
+    4. **Update yt-dlp** - Run: `pip install --upgrade yt-dlp`
+    """)
+    
+    st.info("💡 **Quick Fix:** Switch to 'From File Upload' and upload the video file directly!")
+
 def download_audio_from_youtube(url, output_path="temp_audio"):
     """Downloads the best quality audio from a YouTube URL and saves it as an MP3."""
     ydl_opts = {
-        'format': 'bestaudio/best',
+        'format': 'bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best',
         'outtmpl': output_path,
         'quiet': True,
+        'no_warnings': True,
+        'extract_flat': False,
         'postprocessors': [{'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3', 'preferredquality': '192'}],
+        'prefer_ffmpeg': True,
+        'keepvideo': False,
+        'writesubtitles': False,
+        'writeautomaticsub': False,
+        'ignoreerrors': False,
+        'nocheckcertificate': True,
+        'geo_bypass': True,
     }
+    
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([url])
-        return f"{os.path.splitext(output_path)[0]}.mp3"
+            # First, try to get available formats to debug
+            try:
+                info = ydl.extract_info(url, download=False)
+                available_formats = info.get('formats', [])
+                audio_formats = [f for f in available_formats if f.get('acodec') != 'none']
+                
+                if not audio_formats:
+                    st.warning("No audio formats available for this video. Trying alternative approach...")
+                    # Fallback to more permissive format selection
+                    ydl_opts['format'] = 'bestaudio/best'
+                    with yt_dlp.YoutubeDL(ydl_opts) as ydl2:
+                        ydl2.download([url])
+                else:
+                    # Use the original options with available formats
+                    ydl.download([url])
+                    
+            except Exception as format_error:
+                st.warning(f"Format detection failed, trying fallback: {format_error}")
+                # Ultimate fallback - try any available format
+                ydl_opts['format'] = 'best'
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl3:
+                    ydl3.download([url])
+        
+        # Check if the file was created
+        expected_file = f"{os.path.splitext(output_path)[0]}.mp3"
+        if os.path.exists(expected_file):
+            return expected_file
+        else:
+            # Try alternative extensions
+            for ext in ['.m4a', '.webm', '.mp3']:
+                alt_file = f"{os.path.splitext(output_path)[0]}{ext}"
+                if os.path.exists(alt_file):
+                    return alt_file
+            
+            st.error("Download completed but file not found. This may be a format compatibility issue.")
+            return None
+            
     except Exception as e:
-        st.warning(f"Could not download audio from {url}. Skipping. Error: {e}")
+        error_msg = str(e).lower()
+        
+        # Check for specific format errors
+        if "requested format is not available" in error_msg or "format" in error_msg:
+            handle_youtube_format_issues(url)
+        else:
+            st.warning(f"Could not download audio from {url}. Error: {e}")
+            st.info("💡 **Troubleshooting Tips:**")
+            st.markdown("""
+            - **Try a different video** - Some videos have restricted formats
+            - **Check video availability** - Make sure the video is public and accessible
+            - **Use file upload** - If URL doesn't work, try uploading the video file directly
+            """)
+        
         return None
 
 @st.cache_resource
@@ -196,7 +275,7 @@ def analyze_transcript_for_clips(transcript, model_name, num_clips, chunk_size, 
         return None
     
     # Show selection results
-    st.success(f"🎯 Found {len(selected_clips)} high-quality clips from {len(all_potential_clips)} potential moments across your entire transcript!")
+    # Removed the success message about number of clips found
     
     if len(selected_clips) < num_clips:
         st.info(f"💡 Only {len(selected_clips)} clips met our quality standards. This is actually better than forcing {num_clips} mediocre clips!")
@@ -353,7 +432,7 @@ def select_best_clips_from_all(all_potential_clips, target_clips, model_name):
             # Validate that we got the right number of clips
             lines = [line for line in response.text.strip().split('\n') if '|' in line and '---' not in line]
             if len(lines) > 0:
-                st.info(f"🔍 AI selected {len(lines)} clips from {len(all_potential_clips)} potential moments")
+                # Removed the AI selection info messages
                 if len(lines) < target_clips:
                     st.warning(f"⚠️ AI could only find {len(lines)} viral-worthy clips out of {target_clips} requested")
                 return response.text
@@ -851,6 +930,10 @@ with tab1:
 
     if input_method == "From YouTube URL":
         video_url = st.text_input("Enter YouTube Video URL", placeholder="e.g., https://www.youtube.com/watch?v=...")
+        
+        # Add helpful guidance about potential issues
+        st.info("💡 **Note:** Some YouTube videos may have format restrictions. If URL processing fails, use 'From File Upload' instead.")
+        
         if st.button("Generate Transcript from URL", key="generate_transcript_btn"):
             if video_url:
                 with st.spinner("Generating transcript... This may take a few minutes."):
