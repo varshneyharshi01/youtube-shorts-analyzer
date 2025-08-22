@@ -8,6 +8,7 @@ import yt_dlp
 import whisper
 import pandas as pd
 import tempfile
+import json
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
@@ -114,44 +115,334 @@ def transcribe_uploaded_video(video_file_bytes):
             os.remove(temp_video_path)
         return None
 
-def analyze_transcript_for_clips(chunk, model_name, num_clips):
-    """Analyzes a transcript chunk to find viral clips."""
+        # --- NEW HELPER FUNCTION ---
+def generate_context_from_transcript(transcript, model_name):
+    """Analyzes a transcript to generate a structured JSON context summary."""
     prompt = f"""
-    ROLE AND GOAL:
-    You are an Expert YouTube Content Strategist and Video Editor, specializing in creating viral short-form content. Your primary goal is to analyze the provided video transcript and identify {num_clips} self-contained clips that can be edited into compelling YouTube Shorts.
-
-    CONTEXT:
-    Your analysis must be sharp, insightful, and directly actionable. The output must be a single Markdown table, and nothing else.
+    ROLE: You are a senior YouTube content strategist and analyst.
+    TASK: Analyze the provided video transcript and distill its core components into a structured JSON object.
 
     INSTRUCTIONS:
-    1.  Read through the entire transcript to find segments that are emotionally resonant, surprising, or highly valuable.
-    2.  Focus on clips that are ideally 45-60 seconds long.
-    3.  For each identified clip, provide a detailed breakdown formatted EXACTLY into the 7 columns specified below. Adherence to this format is crucial.
+    1. Read the entire transcript to understand the topic, message, and emotional undercurrent.
+    2. Extract the information and format it precisely into the following JSON keys:
+        - "core_message": (String) The single most important takeaway or argument of the clip in one sentence.
+        - "emotional_tone": (String) Describe the primary emotion of the speaker (e.g., "Hopeful Vindication", "Frustration", "Excitement").
+        - "key_topics": (List of strings) A list of the main topics discussed.
+        - "target_audience": (String) Who is this video for? (e.g., "Aspiring artists", "Tech enthusiasts").
+        - "hook_statement": (String) The single most powerful or attention-grabbing sentence from the transcript.
+    3. Your output MUST be ONLY the raw JSON object and nothing else. Do not wrap it in markdown backticks.
 
-    **COLUMN DEFINITIONS AND EXAMPLES:**
-    1.  **`Timestamp`**: The start and end time of the clip from the transcript.
-    2.  **`Duration`**: The calculated raw duration of the clip in seconds.
-    3.  **`Strategy`**: A one line explaination how that short can be made so it can give potential (for example: "Start with the direct question "Do you actually get people to fear you?" and emphasize the secretive life aspect.").
-    4.  **`Why it works`**: An explaination why that suggested clip will work (for example, "Fear of Mentalists: Highlights the intriguing and slightly intimidating nature of being a mentalist. Intriguing and personal.").
-    5.  **`Pacing/Editing Notes`**: Specific, actionable editing advice.
-    6.  **`Hook / Opening Line`**: The exact first sentence from the transcript (for example, ""People are scared of me because I'm a mentalist... I live a very secretive life. #Mentalist #Magic")
-    7.  **`Success Potential`**: A rating (Very High, High, Medium) followed by a justification (for example, "High: Creates curiosity, plays on common perceptions of mentalists, and includes a strong, somewhat mysterious personal statement.")
-
-    **FINAL RULE:**
-    Sort the final table by the `Timestamp` column in ascending order (from earliest to latest).
-
-    **Transcript to Analyze:**
+    TRANSCRIPT:
     ---
-    {chunk}
+    {transcript}
     ---
     """
     try:
         model = genai.GenerativeModel(model_name)
         response = model.generate_content(prompt)
-        return response.text
+        # Clean the response to ensure it's a valid JSON string
+        clean_json_str = response.text.strip().replace("```json", "").replace("```", "")
+        # Parse the JSON string into a Python dictionary
+        context_dict = json.loads(clean_json_str)
+        return context_dict
     except Exception as e:
-        st.error(f"An error occurred with the Gemini API: {e}")
+        st.error(f"An error occurred during context generation (JSON parsing failed): {e}")
+        st.text_area("Failed AI Response:", response.text if 'response' in locals() else "No response from AI.", height=150)
         return None
+def analyze_transcript_for_clips(transcript, model_name, num_clips, chunk_size, progress_bar=None):
+    """Analyzes a transcript to find viral clips with smart selection across entire content."""
+    
+    # Split transcript into chunks for analysis (but not for clip generation)
+    chunks, _, _ = split_transcript_into_chunks(transcript, num_clips, chunk_size)
+    
+    if not chunks:
+        st.error("Failed to process transcript chunks.")
+        return None
+    
+    # Show chunking information to user
+    st.info(f"📊 Analyzing transcript in {len(chunks)} chunks for optimal coverage. Target: {num_clips} high-quality clips.")
+    
+    # Step 1: Analyze each chunk to find ALL potential clip moments
+    all_potential_clips = []
+    
+    for i, chunk in enumerate(chunks):
+        # Update progress bar
+        if progress_bar:
+            progress_text = f"Analyzing chunk {i+1}/{len(chunks)} for potential clips..."
+            progress_bar.progress((i) / len(chunks), text=progress_text)
+        
+        # Find potential clips in this chunk (more than needed, for selection)
+        potential_clips = find_potential_clips_in_chunk(chunk, model_name, i+1, len(chunks))
+        if potential_clips:
+            all_potential_clips.extend(potential_clips)
+    
+    # Step 2: Smart selection of best clips across entire transcript
+    if progress_bar:
+        progress_bar.progress(0.8, text="Selecting best clips from entire transcript...")
+    
+    selected_clips = select_best_clips_from_all(all_potential_clips, num_clips, model_name)
+    
+    # Final progress update
+    if progress_bar:
+        progress_bar.progress(1.0, text="Analysis complete!")
+    
+    if not selected_clips:
+        st.warning("⚠️ No high-quality clips found. This may indicate:")
+        st.markdown("""
+        - **Content quality** - The transcript may not contain enough viral-worthy moments
+        - **Duration requirements** - Clips must be 35-45 seconds for optimal performance
+        - **AI analysis** - Consider using Gemini Pro for more detailed content analysis
+        """)
+        return None
+    
+    # Show selection results
+    st.success(f"🎯 Found {len(selected_clips)} high-quality clips from {len(all_potential_clips)} potential moments across your entire transcript!")
+    
+    if len(selected_clips) < num_clips:
+        st.info(f"💡 Only {len(selected_clips)} clips met our quality standards. This is actually better than forcing {num_clips} mediocre clips!")
+    
+    return selected_clips
+
+def find_potential_clips_in_chunk(chunk, model_name, chunk_num, total_chunks):
+    """Finds potential clips in a chunk using the engineered prompt for better distribution."""
+    
+    prompt = f"""
+    The Engineered Prompt
+    ROLE:
+    You are an expert YouTube Shorts strategist and viral content analyst. Your core skill is identifying high-engagement moments in long-form video transcripts and structuring them into a strategic content plan. You think like both a data analyst and a creative video editor.
+
+    OBJECTIVE:
+    Analyze the provided raw video transcript chunk to identify high-potential clips that can be edited into successful YouTube Shorts. This is chunk {chunk_num} of {total_chunks} from a larger transcript.
+
+    INPUT DATA:
+    A video transcript chunk with timestamps.
+
+    CRITICAL RULES & CONSTRAINTS:
+
+    Clip Selection: Identify ALL high-potential clips in this chunk. Prioritize moments that contain one or more of the following viral triggers:
+
+    - Strong Emotional Hooks: Stories of struggle, success, vulnerability, or nostalgia.
+    - Counter-Intuitive Insights: Ideas that challenge conventional wisdom.
+    - High Value & Actionable Advice: Specific formulas, frameworks, or tips that the audience can apply to their own lives (e.g., business strategies, life hacks, investment philosophies).
+    - Shock & Surprise: Unexpected revelations, shocking numbers, or bizarre anecdotes.
+    - Relatability: Universal experiences, problems, or feelings.
+
+    Duration Mandate: Every single clip identified must have a duration that is strictly between 25 and 45 seconds. This is a non-negotiable rule.
+
+    Accuracy Mandate: All timestamp selections and duration calculations must be mathematically perfect. Before providing the final output, you must double-check every single row to ensure the (End Time) - (Start Time) calculation is precise and fits the 25-45 second window.
+
+    REQUIRED OUTPUT FORMAT:
+    Present the final results in a single, comprehensive markdown table. The table must have the following seven columns, arranged in this exact order:
+
+    Shorts No | Timestamp (Start - End) | Duration | Why it Works (Content Focus) | Strategy | Hook for this Short | Success Potential & Justification
+
+    COLUMN DEFINITIONS:
+
+    Shorts No: A sequential number for each clip suggestion (1, 2, 3...).
+
+    Timestamp (Start - End): The precise start and end time from the transcript for the suggested clip.
+
+    Duration: The exact, calculated duration of the clip in seconds. Must be between 25 and 45.
+
+    Why it Works (Content Focus): A concise summary of the clip's core message and why it is compelling or valuable to an audience.
+
+    Strategy: A brief, actionable strategy for how to edit or frame the clip for maximum impact (e.g., "Use bold text overlays for key numbers," "Frame it as a secret strategy," "Build suspense before the reveal").
+
+    Hook for this Short: A powerful, attention-grabbing sentence that can be used as the video's title or opening line. This should be directly derived from the clip's content.
+
+    Success Potential & Justification: A rating (e.g., Medium-High, High, Very High, Extremely High) followed by a single, concise sentence explaining why it has that potential (e.g., "It taps into the universal emotion of a pet's unconditional love, making it highly shareable.").
+
+    EXECUTION:
+    Begin your analysis now on the transcript chunk provided below. Find ALL viral-worthy moments in this chunk, ensuring even distribution across the timeline.
+
+    **Transcript Chunk {chunk_num} to Analyze:**
+    ---
+    {chunk}
+    ---
+    
+    Return ONLY a Markdown table with your findings. If no viral moments exist, return an empty table.
+    """
+    
+    try:
+        model = genai.GenerativeModel(model_name)
+        response = model.generate_content(prompt)
+        
+        if response.text and '|' in response.text:
+            return response.text
+        return None
+        
+    except Exception as e:
+        st.error(f"Error analyzing chunk {chunk_num}: {e}")
+        return None
+
+def select_best_clips_from_all(all_potential_clips, target_clips, model_name):
+    """Intelligently selects the best clips from all potential moments across the transcript."""
+    
+    if not all_potential_clips:
+        return None
+    
+    # Combine all potential clips into one analysis
+    combined_potential = "\n\n".join(all_potential_clips)
+    
+    prompt = f"""
+    The Engineered Prompt - Final Selection
+    ROLE:
+    You are an expert YouTube Shorts strategist and viral content analyst. Your core skill is identifying high-engagement moments in long-form video transcripts and structuring them into a strategic content plan.
+
+    OBJECTIVE:
+    Review ALL potential clips discovered from the entire transcript and select the TOP {target_clips} clips that will give the best performance. This is the final selection phase.
+
+    INPUT DATA:
+    Multiple markdown tables containing potential viral clips from different parts of the transcript.
+
+    CRITICAL RULES & CONSTRAINTS:
+
+    Selection Criteria: Select EXACTLY {target_clips} clips based on:
+    1. **Viral Potential**: Highest success potential ratings
+    2. **Content Quality**: Most compelling and valuable content
+    3. **Timeline Distribution**: Spread clips evenly across the entire transcript duration
+    4. **Duration Compliance**: All clips must be 25-45 seconds
+    5. **Diversity**: Mix of different viral trigger types
+
+    Distribution Mandate: 
+    - DO NOT cluster all clips in one time period
+    - Spread clips evenly across the transcript timeline
+    - If transcript is 26 minutes, clips should cover 0:00 to 26:00
+    - If transcript is 10 minutes, clips should cover 0:00 to 10:00
+    - **CRITICAL**: Ensure clips are distributed across different time periods, not clustered together
+
+    REQUIRED OUTPUT FORMAT:
+    Present the final results in a single, comprehensive markdown table. The table must have the following seven columns, arranged in this exact order:
+
+    Shorts No | Timestamp (Start - End) | Duration | Why it Works (Content Focus) | Strategy | Hook for this Short | Success Potential & Justification
+
+    COLUMN DEFINITIONS:
+
+    Shorts No: A sequential number for each clip suggestion (1, 2, 3...).
+
+    Timestamp (Start - End): The precise start and end time from the transcript for the suggested clip.
+
+    Duration: The exact, calculated duration of the clip in seconds. Must be between 25 and 45.
+
+    Why it Works (Content Focus): A concise summary of the clip's core message and why it is compelling or valuable to an audience.
+
+    Strategy: A brief, actionable strategy for how to edit or frame the clip for maximum impact.
+
+    Hook for this Short: A powerful, attention-grabbing sentence that can be used as the video's title or opening line.
+
+    Success Potential & Justification: A rating (e.g., Medium-High, High, Very High, Extremely High) followed by a single, concise sentence explaining why it has that potential.
+
+    FINAL REQUIREMENTS:
+    1. Return EXACTLY {target_clips} clips
+    2. Sort by timestamp to show chronological distribution
+    3. Ensure even distribution across the entire transcript timeline
+    4. All clips must be 25-45 seconds
+    5. Each clip must have genuine viral potential
+
+    **Potential Clips to Select From:**
+    ---
+    {combined_potential}
+    ---
+    """
+    
+    try:
+        model = genai.GenerativeModel(model_name)
+        response = model.generate_content(prompt)
+        
+        if response.text and '|' in response.text:
+            # Validate that we got the right number of clips
+            lines = [line for line in response.text.strip().split('\n') if '|' in line and '---' not in line]
+            if len(lines) > 0:
+                st.info(f"🔍 AI selected {len(lines)} clips from {len(all_potential_clips)} potential moments")
+                if len(lines) < target_clips:
+                    st.warning(f"⚠️ AI could only find {len(lines)} viral-worthy clips out of {target_clips} requested")
+                return response.text
+        return None
+        
+    except Exception as e:
+        st.error(f"Error selecting best clips: {e}")
+        return None
+
+def split_transcript_into_chunks(transcript, num_clips, max_chunk_duration_minutes=10):
+    """
+    Splits transcript into chunks and distributes clip requests evenly across them.
+    This ensures clips cover the entire transcript duration.
+    """
+    if not transcript:
+        return [], 0, 0
+    
+    # Parse transcript to get total duration
+    lines = transcript.strip().split('\n')
+    timestamps = []
+    
+    for line in lines:
+        if '-->' in line:
+            try:
+                start_time = line.split('-->')[0].strip()
+                end_time = line.split('-->')[1].strip()
+                # Convert timestamp to seconds
+                start_seconds = timestamp_to_seconds(start_time)
+                end_seconds = timestamp_to_seconds(end_time)
+                timestamps.append((start_seconds, end_seconds))
+            except:
+                continue
+    
+    if not timestamps:
+        return [transcript], num_clips, 0  # Fallback if no timestamps found
+    
+    total_duration = max([end for _, end in timestamps])
+    chunk_duration = max_chunk_duration_minutes * 60  # Convert to seconds
+    num_chunks = max(1, int(total_duration / chunk_duration) + 1)
+    
+    # Distribute clips evenly across chunks
+    clips_per_chunk = max(1, num_clips // num_chunks)
+    remaining_clips = num_clips % num_chunks
+    
+    chunks = []
+    current_chunk = []
+    current_chunk_start = 0
+    
+    for line in lines:
+        if '-->' in line:
+            try:
+                start_time = line.split('-->')[0].strip()
+                start_seconds = timestamp_to_seconds(start_time)
+                
+                # Check if we need to start a new chunk
+                if start_seconds >= current_chunk_start + chunk_duration:
+                    if current_chunk:
+                        chunks.append('\n'.join(current_chunk))
+                    current_chunk = [line]
+                    current_chunk_start = start_seconds
+                else:
+                    current_chunk.append(line)
+            except:
+                current_chunk.append(line)
+        else:
+            current_chunk.append(line)
+    
+    # Add the last chunk
+    if current_chunk:
+        chunks.append('\n'.join(current_chunk))
+    
+    return chunks, clips_per_chunk, remaining_clips
+
+def timestamp_to_seconds(timestamp):
+    """Converts SRT timestamp format (HH:MM:SS,ms) to seconds."""
+    try:
+        # Remove milliseconds
+        timestamp = timestamp.split(',')[0]
+        parts = timestamp.split(':')
+        if len(parts) == 3:
+            hours, minutes, seconds = map(int, parts)
+            return hours * 3600 + minutes * 60 + seconds
+        elif len(parts) == 2:
+            minutes, seconds = map(int, parts)
+            return minutes * 60 + seconds
+        else:
+            return int(parts[0])
+    except:
+        return 0
 
 def select_strongest_clips(clips_markdown, model_name, num_top_clips):
     """Analyzes a markdown table of clips to select the top N strongest ones."""
@@ -223,50 +514,37 @@ def analyze_viral_patterns(transcripts_str, model_name):
         st.error(f"An error occurred with the Gemini API: {e}")
         return None
 
-def generate_shorts_titles(transcript, audience, takeaway, tone, model_name):
-    """Generates Shorts titles using an advanced framework and user-provided context."""
+# --- THIS IS THE CORRECTED FUNCTION ---
+
+def generate_shorts_titles(generated_context, strategy_params, model_name):
+    """Generates Shorts titles using generated context and strategy parameters."""
+    # This part is crucial: it unpacks the dictionary from the UI
+    audience = strategy_params.get('audience', 'a general audience, yotube audience ')
+    takeaway = strategy_params.get('takeaway', 'the main message')
+    tone = strategy_params.get('tone', 'an engaging tone')
+
     prompt = f"""
     ROLE AND GOAL:
-    You are an expert viral content strategist based in Noida, specializing in writing high-engagement, "scroll-stopping" titles for YouTube Shorts. Your goal is to generate 15-20 powerful titles based on the provided transcript and context, using the specific strategies listed below.
+    You are an expert viral content strategist based in Noida, specializing in writing high-engagement, "scroll-stopping" titles for YouTube Shorts. Your goal is to generate 15-20 powerful titles based on the provided video context and strategic parameters.
 
-    CONTEXT:
+    CONTEXT OF THE VIDEO:
+    ---
+    {generated_context}
+    ---
+
+    STRATEGIC PARAMETERS:
     - **Target Audience:** {audience}
     - **Main Takeaway/Message:** {takeaway}
     - **Desired Tone/Style:** {tone}
 
     TITLE GENERATION STRATEGIES TO USE:
-    1.  **Punchline / Reveal:** Drop a surprising or bold fact early (e.g., “50% of My Income Comes from Social Media?!”)
-    2.  **Controversial Opinion:** Spark debate or strong reactions (e.g., “Freelancing Is Dead – Here's Why”)
-    3.  **Clear Outcome / Result:** Show tangible success or transformation (e.g., “How I Made ₹10L in 6 Months Freelancing”)
-    4.  **Problem Statement:** Call out a relatable pain point (e.g., “Struggling to Get Clients? Watch This.”)
-    5.  **Contradiction / Irony:** Challenge common assumptions (e.g., “Clients Pay Less Than My Instagram Posts Do”)
-    6.  **Curiosity Hook:** Create an information gap people want to close (e.g., “I Did THIS Before Every Big Client Deal”)
-    7.  **Secret / Hidden Strategy:** Tease insider tips or unknown hacks (e.g., “The Tool No Freelancer Talks About”)
-    8.  **Urgency / FOMO:** Build pressure to act now or miss out (e.g., “Do This Before It’s Too Late!”)
-    9.  **List or Framework:** Use structure like steps, tips, or tools (e.g., “3 Steps to Build a High-Income Side Hustle”)
-    10. **Transformation / Before-After:** Show clear change over time or effort (e.g., “From ₹0 to ₹1L/Month in 90 Days”)
-    11. **Emotional Trigger:** Use words that evoke strong feelings (e.g., “My Biggest Failure”)
-    12. **Direct Question:** Ask a question the audience wants answered (e.g., “Is This The Future?”)
-    13. **Surprising/Unexpected:** Surprise the audience with a surprising fact or statement (e.g., “I’m a Mentalist”)
-    14. **Motivational:** Motivate the audience to take action (e.g., “Don’t Let Fear Hold You Back”)
-    15. **Nostalgic/Sentimental:** Evoke nostalgia or sentimentality (e.g., “The Best Advice I Ever Got”)
-    16. **Aspirational / Luxurious:** Inspire the audience to aspire to something (e.g., “The Best Way to Make Money”)
-    17. **Intriguing/Mysterious:** Intrigue the audience with a mysterious or intriguing statement (e.g., “The Secret to Success”)
-    18. **Urgent/Timely:** Create a sense of urgency or timeliness (e.g., “Do This Before It’s Too Late!”)
+    (Your full list of 18 strategies goes here)
+    1.  **Punchline / Reveal:** ...
+    2.  **Controversial Opinion:** ...
+    (etc.)
 
     INSTRUCTIONS:
     Your final output must be ONLY a Markdown table with two columns: "Strategy" and "Suggested Title". Do not include any other text, explanation, or introduction.
-
-    EXAMPLE OUTPUT:
-    | Strategy | Suggested Title |
-    |---|---|
-    | Punchline / Reveal | My Biggest Client Was a Scam |
-    | Problem Statement | Tired of Unpaid Invoices? |
-    | List or Framework | 3 Tools That Saved My Business |
-
-
-    --- TRANSCRIPT FOR ANALYSIS ---
-    {transcript}
     """
     try:
         model = genai.GenerativeModel(model_name)
@@ -275,14 +553,18 @@ def generate_shorts_titles(transcript, audience, takeaway, tone, model_name):
     except Exception as e:
         st.error(f"An error occurred with the Gemini API: {e}")
         return None
-
 def generate_headers(transcript, core_message, peak_moment, audience_tone, model_name):
-    """Generates thumbnail headers using the context-aware framework."""
+    """Generates thumbnail headers using the transcript directly."""
     prompt = f"""
     ROLE AND GOAL:
     You are an expert thumbnail text generator. Your sole focus is to create 10-15 short, powerful, and high-impact headers for a YouTube Short thumbnail based on the provided transcript and context. The headers should be 3-7 words max.
 
-    CONTEXT BRIEF:
+    CONTEXT OF THE VIDEO:
+    ---
+    {transcript}
+    ---
+
+    STRATEGIC PARAMETERS:
     - **Core Message:** {core_message}
     - **Peak Moment / Hook:** {peak_moment}
     - **Audience & Tone:** {audience_tone}
@@ -307,6 +589,67 @@ def generate_headers(transcript, core_message, peak_moment, audience_tone, model
     --- TRANSCRIPT FOR ANALYSIS ---
     {transcript}
     """
+    try:
+        model = genai.GenerativeModel(model_name)
+        response = model.generate_content(prompt)
+        return response.text
+    except Exception as e:
+        st.error(f"An error occurred with the Gemini API: {e}")
+        return None
+
+def generate_headers_from_context(generated_context, header_params, model_name):
+    """Generates thumbnail headers using the generated context from transcript."""
+    core_message = header_params.get('core_message', 'the main message')
+    peak_moment = header_params.get('peak_moment', 'the key moment')
+    audience_tone = header_params.get('audience_tone', 'general audience')
+    
+    prompt = f"""
+ROLE AND GOAL:
+You are an expert YouTube Thumbnail Text strategist. Your goal is to create 10-15 powerful, high-impact headers for a YouTube Short thumbnail. The headers must be concise but also highly specific and intriguing to maximize click-through rates. They should be visually scannable in 1-2 seconds.
+
+CRITICAL CONTEXT OF THE VIDEO (Generated from Transcript):
+---
+{generated_context}
+---
+
+STRATEGIC PARAMETERS:
+- **Core Message:** {core_message}
+- **Peak Moment / Hook:** {peak_moment}
+- **Audience & Tone:** {audience_tone}
+
+GUIDING PRINCIPLES (You MUST follow these):
+1.  **BE HYPER-SPECIFIC:** This is the most important rule. You MUST incorporate specific names, numbers, keywords, or unique concepts from the context above.
+    -   **BAD (Generic):** "Feeling Overwhelmed?"
+    -   **GOOD (Specific):** "Overwhelmed by Finances?"
+    -   **BAD (Generic):** "The Best Advice I Ever Got"
+    -   **GOOD (Specific):** "Tanmay Bhatt's Best Advice"
+
+2.  **FOCUS ON TRANSFORMATION & OUTCOME:** Frame the headers around a clear "before & after" or a tangible result.
+    -   **BAD (Generic):** "Get Organized Now"
+    -   **GOOD (Specific):** "From Confused To Clear" or "My Finances In 1 Sheet"
+
+3.  **LEVERAGE AUTHORITY/PERSONALITY:** If a specific person or brand is mentioned in the context (like 'Tanmay Bhatt'), use their name directly in the headers to build credibility and curiosity.
+
+4.  **THINK VISUALLY (LINES OF TEXT):** While the headers should be short, don't be afraid to use 2-3 extra words if it adds crucial context. Imagine how the text would break into lines on a thumbnail.
+    -   Example: "TANMAY'S SECRET // TO FIXING FINANCES" is more powerful than "The Financial Secret".
+
+HEADER STRATEGIES TO USE (Apply the principles above to these strategies):
+- **Problem/Solution:** (e.g., "Finances A Mess? Try This.")
+- **Curiosity Gap:** (e.g., "Tanmay Bhatt's 1-Sheet Secret")
+- **Bold Statement:** (e.g., "This Excel Sheet Changed My Life")
+- **Result-Oriented:** (e.g., "Clarity In 15 Minutes")
+- **Emotional Trigger:** (e.g., "I Was So Lost With Money")
+- **Direct Question:** (e.g., "Need Financial Clarity?")
+- **Surprising/Unexpected:** (e.g., "My Mentor? Tanmay Bhatt.")
+- **Motivational:** (e.g., "Stop Feeling Stuck With Money")
+- **Nostalgic/Sentimental:** (e.g., "The Advice That Saved Me")
+- **Aspirational:** (e.g., "Your Path To Financial Freedom")
+- **Intriguing/Mysterious:** (e.g., "The Secret The Rich Use")
+- **Urgent/Timely:** (e.g., "Fix Your Finances NOW")
+
+INSTRUCTIONS:
+Your final output must be ONLY a Markdown table with two columns: "Strategy" and "Suggested Header". Do not include any other text, preamble, or explanation.
+"""
     try:
         model = genai.GenerativeModel(model_name)
         response = model.generate_content(prompt)
@@ -445,11 +788,50 @@ def parse_markdown_table(markdown_text):
     """Parses a Markdown table into a Pandas DataFrame."""
     if not markdown_text: return pd.DataFrame()
     lines = [line for line in markdown_text.strip().split('\n') if '|' in line and '---' not in line]
-    if not lines: return pd.DataFrame()
+    if not lines: return pd.DataFrame(columns=header)
     header = [h.strip() for h in lines[0].split('|') if h.strip()]
     data = [[r.strip() for r in line.split('|') if r.strip()] for line in lines[1:]]
     data = [row for row in data if len(row) == len(header)]
     return pd.DataFrame(data, columns=header) if data else pd.DataFrame(columns=header)
+
+def validate_clip_durations(clips_text, min_duration=30, max_duration=60):
+    """
+    Validates that generated clips meet duration requirements and provides feedback.
+    """
+    if not clips_text:
+        return clips_text, []
+    
+    # Parse the markdown table
+    lines = clips_text.strip().split('\n')
+    valid_clips = []
+    invalid_clips = []
+    
+    for line in lines:
+        if '|' in line and '---' not in line:
+            parts = [part.strip() for part in line.split('|')]
+            if len(parts) >= 7:  # Ensure we have enough columns
+                try:
+                    # Extract duration from the second column
+                    duration_str = parts[1].replace('s', '').replace(' seconds', '').strip()
+                    duration = int(duration_str)
+                    
+                    if min_duration <= duration <= max_duration:
+                        valid_clips.append(line)
+                    else:
+                        invalid_clips.append({
+                            'line': line,
+                            'duration': duration,
+                            'issue': f"Duration {duration}s is outside required range ({min_duration}-{max_duration}s)"
+                        })
+                except (ValueError, IndexError):
+                    # If we can't parse duration, include it but mark as potentially problematic
+                    valid_clips.append(line)
+            else:
+                valid_clips.append(line)
+        else:
+            valid_clips.append(line)
+    
+    return '\n'.join(valid_clips), invalid_clips
 
 # ##############################################################################
 # --- STREAMLIT UI SECTION ---
@@ -458,9 +840,8 @@ def parse_markdown_table(markdown_text):
 if 'transcript' not in st.session_state:
     st.session_state['transcript'] = ""
 
-tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
-    "🎬 Generate Clips", "🕵️‍♀️ Analyze Patterns", "✍️ Generate Titles",
-    "💡 Headers Generator", "🚀 Pre-Upload Review", "📈 Post-Upload Diagnosis"
+tab1, tab3 = st.tabs([
+    "🎬 Generate Clips", "✍️ Generate Titles & Headers"
 ])
 
 # --- TAB 1: GENERATE CLIPS ---
@@ -491,25 +872,67 @@ with tab1:
         
         st.markdown("---")
         st.subheader("Step 1: Find All Potential Clips")
-        col1, col2 = st.columns(2)
+        col1, col2, col3 = st.columns(3)
         num_clips = col1.number_input("Number of clip ideas to find", 3, 50, 7, 1, key="num_clips_input")
         model_choice_t1 = col2.selectbox("Choose Model", ("gemini-1.5-flash-latest", "gemini-1.5-pro-latest"), key="model_choice_t1", help="Flash is faster. Pro provides more detailed analysis.")
+        chunk_size = col3.number_input("Chunk size (minutes)", 5, 20, 10, 1, key="chunk_size_input", help="Smaller chunks = better coverage of long transcripts. For 26+ min videos, use 5-8 minutes.")
+        
+        # Show chunk size recommendations for long transcripts
+        if st.session_state.get('transcript'):
+            transcript_length = len(st.session_state.transcript.split('\n'))
+            if transcript_length > 1000:  # Estimate for long transcripts
+                st.info("📏 **For long transcripts (26+ minutes):** Use chunk size 5-8 minutes for optimal coverage and 35-45 second clips.")
+        
+        # Explain the new smart selection approach
+        st.info("🎯 **New Smart Selection System:** The AI will analyze your ENTIRE transcript but only select truly viral-worthy moments. You may get fewer clips than requested if the content quality doesn't meet our standards - this ensures every clip has real viral potential!")
         
         if st.button("✨ Find Clip Ideas", type="primary", key="analyze_btn_t1"):
             with st.spinner("Gemini is analyzing the transcript for clips..."):
-                st.session_state['raw_analysis_table'] = analyze_transcript_for_clips(st.session_state.transcript, model_choice_t1, num_clips)
-                st.session_state['strong_clips_table'] = None
+                # Show chunking information first
+                chunks, _, _ = split_transcript_into_chunks(st.session_state.transcript, num_clips, chunk_size)
+                if chunks:
+                    st.info(f"📊 Processing transcript in {len(chunks)} chunks. Target: {num_clips} clips total.")
+                    
+                    # Show progress bar for chunk processing
+                    progress_bar = st.progress(0, text="Processing chunks...")
+                    
+                    st.session_state['raw_analysis_table'] = analyze_transcript_for_clips(st.session_state.transcript, model_choice_t1, num_clips, chunk_size, progress_bar)
+                    st.session_state['strong_clips_table'] = None
+                    
+                    progress_bar.empty()
+                else:
+                    st.error("Failed to process transcript into chunks. Please check your transcript format.")
         
         if st.session_state.get('raw_analysis_table'):
-            st.success("Analysis Complete! Here are all potential clips.")
+            # Parse and display the raw analysis results
             df = parse_markdown_table(st.session_state['raw_analysis_table'])
             if not df.empty:
+                st.success(f"🎯 Analysis Complete! Found {len(df)} high-quality clips from your entire transcript.")
+                
+                # Show clip distribution across timeline
+                if 'Timestamp (Start - End)' in df.columns:
+                    # Extract start times from timestamp column to show distribution
+                    start_times = []
+                    for timestamp in df['Timestamp (Start - End)']:
+                        if ' - ' in str(timestamp):
+                            start_time = str(timestamp).split(' - ')[0].strip()
+                            start_times.append(start_time)
+                    
+                    if start_times:
+                        # Show timeline coverage
+                        st.info(f"📊 **Timeline Coverage:** Clips span from {start_times[0]} to {start_times[-1]}")
+                        
+                        # Show distribution across time periods
+                        if len(start_times) > 1:
+                            st.info(f"🎯 **Distribution:** {len(start_times)} clips distributed across the transcript timeline")
+                
+                # Display all discovered clips
                 st.dataframe(df, use_container_width=True)
                 st.download_button("Download Full Analysis as CSV", df.to_csv(index=False).encode('utf-8'), "full_clip_analysis.csv", "text/csv")
                 
                 st.markdown("---")
                 st.subheader("Step 2: Select the Strongest Clips for Upload")
-                num_top_clips = st.number_input("Number of top clips to select", 1, 10, 3, key="num_top_clips")
+                num_top_clips = st.number_input("Number of top clips to select", 1, min(len(df), 20), min(3, len(df)), key="num_top_clips")
                 if st.button("🔥 Find Strongest Clips", key="find_strongest_btn"):
                     with st.spinner("Producer AI is reviewing the list..."):
                         st.session_state['strong_clips_table'] = select_strongest_clips(st.session_state['raw_analysis_table'], model_choice_t1, num_top_clips)
@@ -526,345 +949,296 @@ with tab1:
             else:
                 st.warning("The strong clip selection process did not return a valid table.")
 
-# --- TAB 2: ANALYZE PATTERNS ---
-with tab2:
-    st.subheader("Deconstruct What Makes a Short Go Viral")
-    st.markdown("Add up to 5 successful shorts. The tool will **transcribe each one** and then analyze the content to find common patterns and strategies.")
-    
-    if 'num_url_inputs' not in st.session_state: st.session_state.num_url_inputs = 1
-    
-    def add_url_input():
-        if st.session_state.num_url_inputs < 5: st.session_state.num_url_inputs += 1
-    def remove_url_input():
-        if st.session_state.num_url_inputs > 1: st.session_state.num_url_inputs -= 1
+# --- TAB 2: ANALYZE PATTERNS (COMMENTED OUT) ---
+# with tab2:
+#     st.subheader("Deconstruct What Makes a Short Go Viral")
+#     st.markdown("Add up to 5 successful shorts. The tool will **transcribe each one** and then analyze the content to find common patterns and strategies.")
+#     
+#     if 'num_url_inputs' not in st.session_state: st.session_state.num_url_inputs = 1
+#     
+#     def add_url_input():
+#         if st.session_state.num_url_inputs < 5: st.session_state.num_url_inputs += 1
+#     def remove_url_input():
+#         if st.session_state.num_url_inputs > 1: st.session_state.num_url_inputs -= 1
+# 
+#     for i in range(st.session_state.num_url_inputs):
+#         st.text_input(f"URL for Short #{i+1}", key=f"url_{i}")
+#     
+#     col1, col2, _ = st.columns([1, 1, 4])
+#     col1.button("Add URL ➕", on_click=add_url_input, use_container_width=True)
+#     col2.button("Remove Last ➖", on_click=remove_url_input, use_container_width=True, disabled=(st.session_state.num_url_inputs <= 1))
+# 
+#     model_choice_t2 = st.selectbox("Choose Gemini Model", ("gemini-1.5-flash-latest", "gemini-1.5-pro-latest"), key="model_choice_tab2")
+# 
+#     if st.button("Find Patterns from Transcripts", type="primary", key="find_patterns_btn"):
+#         valid_urls = [st.session_state.get(f"url_{i}") for i in range(st.session_state.num_url_inputs) if st.session_state.get(f"url_{i}")]
+#         if valid_urls:
+#             all_transcripts_for_prompt = []
+#             progress_bar = st.progress(0, text="Starting transcriptions...")
+#             for i, url in enumerate(valid_urls):
+#                 progress_text = f"Processing video {i+1}/{len(valid_urls)}..."
+#                 progress_bar.progress((i) / len(valid_urls), text=progress_text)
+#                 transcript_text = transcribe_audio_with_whisper(url)
+#                 if transcript_text:
+#                     all_transcripts_for_prompt.append(f"--- TRANSCRIPT FOR VIDEO {i+1} ({url}) ---\n{transcript_text}\n--- END ---\n")
+#             
+#             progress_bar.progress(1.0, text="Analyzing with Gemini...")
+#             if all_transcripts_for_prompt:
+#                 final_prompt_content = "\n".join(all_transcripts_for_prompt)
+#                 analysis_result = analyze_viral_patterns(final_prompt_content, model_choice_t2)
+#                 st.markdown("---")
+#                 st.subheader("🔬 Analysis Report")
+#                 st.markdown(analysis_result)
+#             else:
+#                 st.error("Could not generate any transcripts. Please check the URLs.")
+#             progress_bar.empty()
+#         else:
+#             st.warning("Please enter at least one YouTube Short URL.")
 
-    for i in range(st.session_state.num_url_inputs):
-        st.text_input(f"URL for Short #{i+1}", key=f"url_{i}")
-    
-    col1, col2, _ = st.columns([1, 1, 4])
-    col1.button("Add URL ➕", on_click=add_url_input, use_container_width=True)
-    col2.button("Remove Last ➖", on_click=remove_url_input, use_container_width=True, disabled=(st.session_state.num_url_inputs <= 1))
+# --- TAB 3: GENERATE TITLES & HEADERS ---
+# --- MERGED TITLE AND HEADER GENERATOR ---
 
-    model_choice_t2 = st.selectbox("Choose Gemini Model", ("gemini-1.5-flash-latest", "gemini-1.5-pro-latest"), key="model_choice_tab2")
-
-    if st.button("Find Patterns from Transcripts", type="primary", key="find_patterns_btn"):
-        valid_urls = [st.session_state.get(f"url_{i}") for i in range(st.session_state.num_url_inputs) if st.session_state.get(f"url_{i}")]
-        if valid_urls:
-            all_transcripts_for_prompt = []
-            progress_bar = st.progress(0, text="Starting transcriptions...")
-            for i, url in enumerate(valid_urls):
-                progress_text = f"Processing video {i+1}/{len(valid_urls)}..."
-                progress_bar.progress((i) / len(valid_urls), text=progress_text)
-                transcript_text = transcribe_audio_with_whisper(url)
-                if transcript_text:
-                    all_transcripts_for_prompt.append(f"--- TRANSCRIPT FOR VIDEO {i+1} ({url}) ---\n{transcript_text}\n--- END ---\n")
-            
-            progress_bar.progress(1.0, text="Analyzing with Gemini...")
-            if all_transcripts_for_prompt:
-                final_prompt_content = "\n".join(all_transcripts_for_prompt)
-                analysis_result = analyze_viral_patterns(final_prompt_content, model_choice_t2)
-                st.markdown("---")
-                st.subheader("🔬 Analysis Report")
-                st.markdown(analysis_result)
-            else:
-                st.error("Could not generate any transcripts. Please check the URLs.")
-            progress_bar.empty()
-        else:
-            st.warning("Please enter at least one YouTube Short URL.")
-
-# --- TAB 3: GENERATE TITLES ---
 with tab3:
-    st.subheader("✍️ Generate High-Performing Titles")
+    st.subheader("✍️ Generate High-Performing Titles & Headers")
+    st.markdown("Generate both titles and thumbnail headers using common strategy parameters and transcript-based context.")
     
     # Input method selection
-    input_method_t3 = st.radio("Choose input method:", ("Upload Video", "Paste Transcript"), horizontal=True, key="title_input_method")
+    input_method_t3 = st.radio("Choose input method:", ("Upload Video", "Paste Transcript"), horizontal=True, key="title_header_input_method")
     
     if input_method_t3 == "Upload Video":
         # Video upload section
-        uploaded_video_t3 = st.file_uploader("Choose a video file", type=['mp4', 'mov', 'avi'], key="title_video_uploader")
+        uploaded_video_t3 = st.file_uploader("Choose a video file", type=['mp4', 'mov', 'avi'], key="title_header_video_uploader")
         
         if uploaded_video_t3:
             # Two-column layout for video and form
             left_col_t3, right_col_t3 = st.columns([3, 2])
             
             with left_col_t3:
-                st.markdown("### 📝 Title Generation Parameters")
-                audience = st.text_input("Target Audience", placeholder="e.g., Beginner freelancers", key="audience_t3")
-                tone = st.selectbox("Desired Tone", ("Educational", "Bold & Controversial", "Inspirational", "Humorous", "Relatable", "Urgent/Timely", "Intriguing/Mysterious", "Motivational", "Nostalgic/Sentimental", "Aspirational / Luxurious", "Surprising/Unexpected"), key="tone_t3")
-                takeaway = st.text_input("Main Takeaway or Message", placeholder="e.g., Build a personal brand to earn more", key="takeaway_t3")
-                model_choice_t3 = st.selectbox("Choose Gemini Model", ("gemini-1.5-pro-latest", "gemini-1.5-flash-latest"), key="model_choice_tab3")
+                st.markdown("### 📝 Common Strategy Parameters")
+                # Common parameters for both titles and headers
+                audience = st.text_input("Target Audience", placeholder="e.g., Beginner freelancers", key="audience_t3_video")
+                tone = st.selectbox("Desired Tone", ("Educational", "Bold & Controversial", "Inspirational", "Humorous", "Relatable", "Urgent/Timely", "Intriguing/Mysterious", "Motivational", "Nostalgic/Sentimental", "Aspirational / Luxurious", "Surprising/Unexpected"), key="tone_t3_video")
+                takeaway = st.text_input("Main Takeaway or Message", placeholder="e.g., Build a personal brand to earn more", key="takeaway_t3_video")
+                core_message = st.text_input("Core Message (for headers)", placeholder="e.g., The importance of networking", key="core_message_t3_video")
+                peak_moment = st.text_input("Peak Moment / Hook (for headers)", placeholder="e.g., 'I got my dream job from one conversation.'", key="peak_moment_t3_video")
+                model_choice_t3 = st.selectbox("Choose Gemini Model", ("gemini-1.5-pro-latest", "gemini-1.5-flash-latest"), key="model_choice_tab3_video")
                 
-                if st.button("💡 Generate Titles from Video", type="primary", key="suggest_titles_video_btn"):
-                    if audience and takeaway:
-                        with st.spinner("Transcribing video..."):
+                if st.button("🚀 Generate Titles & Headers from Video", type="primary", key="generate_titles_headers_video_btn"):
+                    if audience and takeaway and core_message and peak_moment:
+                        # STEP 1: Transcribe the video
+                        with st.spinner("Step 1/4: Transcribing video..."):
                             video_bytes = uploaded_video_t3.getvalue()
                             video_transcript = transcribe_uploaded_video(video_bytes)
                         
                         if video_transcript:
-                            st.success("Transcription complete! Generating titles...")
-                            with st.spinner("Gemini is crafting strategic titles..."):
-                                titles = generate_shorts_titles(video_transcript, audience, takeaway, tone, model_choice_t3)
-                                if titles:
+                            st.success("Transcription complete!")
+                            
+                            # STEP 2: Generate Context from the transcript
+                            with st.spinner("Step 2/4: AI is analyzing the transcript context..."):
+                                generated_context = generate_context_from_transcript(video_transcript, model_choice_t3)
+
+                            if generated_context:
+                                st.success("Context analysis complete!")
+                                with st.expander("View Generated Context"):
+                                    st.write(generated_context)
+                                
+                                # Bundle strategy parameters for both titles and headers
+                                strategy_params = {"audience": audience, "takeaway": takeaway, "tone": tone}
+                                header_params = {"core_message": core_message, "peak_moment": peak_moment, "audience_tone": f"{audience}; {tone}"}
+
+                                # STEP 3: Generate Titles using the context
+                                with st.spinner("Step 3/4: Gemini is crafting strategic titles..."):
+                                    titles = generate_shorts_titles(generated_context, strategy_params, model_choice_t3)
+                                
+                                # STEP 4: Generate Headers using the context
+                                with st.spinner("Step 4/4: Gemini is crafting powerful headers..."):
+                                    headers = generate_headers_from_context(generated_context, header_params, model_choice_t3)
+                                
+                                # Display results
+                                if titles and headers:
                                     st.markdown("---")
                                     st.subheader("🔥 Suggested Titles (with Strategy)")
                                     st.markdown(titles)
+                                    
+                                    st.markdown("---")
+                                    st.subheader("🚀 Suggested Thumbnail Headers")
+                                    st.markdown(headers)
                                 else:
-                                    st.error("Title generation failed.")
+                                    if not titles:
+                                        st.error("Title generation failed.")
+                                    if not headers:
+                                        st.error("Header generation failed.")
+                            else:
+                                st.error("Context generation failed after transcription.")
                         else:
                             st.error("Could not transcribe the video.")
                     else:
-                        st.warning("Please fill in Target Audience and Main Takeaway fields.")
+                        st.warning("Please fill in all required fields for the best results.")
             
             with right_col_t3:
                 st.markdown("### 📹 Video Preview")
                 st.video(uploaded_video_t3)
                 st.caption(f"📁 {uploaded_video_t3.name}")
     
-    else:
-        # Transcript input section
+    else: # This block handles the "Paste Transcript" option
         transcript_input_t3 = st.text_area("Paste your full Short transcript here", height=200, key="transcript_input_tab3")
+        
+        st.markdown("### 📝 Common Strategy Parameters")
         col1, col2 = st.columns(2)
+        # Common parameters for both titles and headers
         audience = col1.text_input("Target Audience", placeholder="e.g., Beginner freelancers", key="audience_t3_text")
         tone = col1.selectbox("Desired Tone", ("Educational", "Bold & Controversial", "Inspirational", "Humorous", "Relatable", "Urgent/Timely", "Intriguing/Mysterious", "Motivational", "Nostalgic/Sentimental", "Aspirational / Luxurious", "Surprising/Unexpected"), key="tone_t3_text")
-        takeaway = col2.text_input("Main Takeaway or Message", placeholder="e.g., Build a personal brand to earn more", key="takeaway_t3_text")
+        takeaway = col1.text_input("Main Takeaway or Message", placeholder="e.g., Build a personal brand to earn more", key="takeaway_t3_text")
+        core_message = col2.text_input("Core Message (for headers)", placeholder="e.g., The importance of networking", key="core_message_t3_text")
+        peak_moment = col2.text_input("Peak Moment / Hook (for headers)", placeholder="e.g., 'I got my dream job from one conversation.'", key="peak_moment_t3_text")
         model_choice_t3 = st.selectbox("Choose Gemini Model", ("gemini-1.5-pro-latest", "gemini-1.5-flash-latest"), key="model_choice_tab3_text")
         
-        if st.button("💡 Generate Titles from Transcript", type="primary", key="suggest_titles_text_btn"):
-            if transcript_input_t3 and audience and takeaway:
-                with st.spinner("Gemini is crafting strategic titles..."):
-                    titles = generate_shorts_titles(transcript_input_t3, audience, takeaway, tone, model_choice_t3)
-                    if titles:
+        if st.button("🚀 Generate Titles & Headers from Transcript", type="primary", key="generate_titles_headers_text_btn"):
+            if transcript_input_t3 and audience and takeaway and core_message and peak_moment:
+                # STEP 1: Generate Context from the pasted transcript
+                with st.spinner("Step 1/3: AI is analyzing the transcript context..."):
+                    generated_context = generate_context_from_transcript(transcript_input_t3, model_choice_t3)
+                
+                if generated_context:
+                    st.success("Context analysis complete!")
+                    with st.expander("View Generated Context"):
+                        st.write(generated_context)
+                        
+                    # Bundle strategy parameters for both titles and headers
+                    strategy_params = {"audience": audience, "takeaway": takeaway, "tone": tone}
+                    header_params = {"core_message": core_message, "peak_moment": peak_moment, "audience_tone": f"{audience}; {tone}"}
+                    
+                    # STEP 2: Generate Titles using the context
+                    with st.spinner("Step 2/3: Gemini is crafting strategic titles..."):
+                        titles = generate_shorts_titles(generated_context, strategy_params, model_choice_t3)
+                    
+                    # STEP 3: Generate Headers using the context
+                    with st.spinner("Step 3/3: Gemini is crafting powerful headers..."):
+                        headers = generate_headers_from_context(generated_context, header_params, model_choice_t3)
+                    
+                    # Display results
+                    if titles and headers:
                         st.markdown("---")
                         st.subheader("🔥 Suggested Titles (with Strategy)")
                         st.markdown(titles)
+                        
+                        st.markdown("---")
+                        st.subheader("🚀 Suggested Thumbnail Headers")
+                        st.markdown(headers)
                     else:
-                        st.error("Title generation failed.")
+                        if not titles:
+                            st.error("Title generation failed.")
+                        if not headers:
+                            st.error("Header generation failed.")
+                else:
+                    st.error("Context generation failed.")
             else:
-                st.warning("Please fill in all fields for the best results.")
+                st.warning("Please fill in all required fields for the best results.")
 
-# --- TAB 4: HEADERS GENERATOR ---
-with tab4:
-    st.subheader("💡 Headers Generator")
-    transcript_input_t4 = st.text_area("Paste your full Short transcript here", height=200, key="transcript_input_tab4")
-    core_message = st.text_input("Core Message", placeholder="e.g., The importance of networking", key="core_message_tab4")
-    peak_moment = st.text_input("Peak Moment / Hook", placeholder="e.g., 'I got my dream job from one conversation.'", key="peak_moment_tab4")
-    audience_tone = st.text_input("Audience & Tone", placeholder="e.g., For young professionals; inspirational.", key="audience_tone_tab4")
-    model_choice_t4 = st.selectbox("Choose Gemini Model", ("gemini-1.5-pro-latest", "gemini-1.5-flash-latest"), key="model_choice_tab4")
+# --- TAB 4: PRE-UPLOAD REVIEW (COMMENTED OUT) ---
+# with tab4:
+#     st.subheader("🚀 Get a Final Pre-Upload Review")
+#     uploaded_video = st.file_uploader("Choose a video file", type=['mp4', 'mov', 'avi'], key="review_video_uploader")
+#     
+#     if uploaded_video:
+#         # Create a two-column layout: Form on left, Video on right
+#         left_col, right_col = st.columns([3, 2])
+#         
+#         with left_col:
+#             st.markdown("### 📝 Video Context & Analysis")
+#             review_title = st.text_input("Proposed Title", placeholder="e.g., DON'T Make This Freelance Mistake!", key="review_title")
+#             review_header = st.text_input("Thumbnail Header Text", placeholder="e.g., THE #1 MISTAKE", key="review_header")
+#             review_audience = st.text_input("Target Audience", placeholder="e.g., Aspiring freelancers in India", key="review_audience")
+#             review_model_choice = st.selectbox("Choose Gemini Model", ("gemini-1.5-pro-latest", "gemini-1.5-flash-latest"), key="review_model_choice")
+# 
+#             if st.button("🔬 Analyze and Review Short", type="primary", key="get_review_btn"):
+#                 if review_title and review_audience:
+#                     with st.spinner("Transcribing video..."):
+#                         video_bytes = uploaded_video.getvalue()
+#                         review_transcript = transcribe_uploaded_video(video_bytes)
+#                     if review_transcript:
+#                         st.success("Transcription complete! Now getting feedback...")
+#                         with st.spinner("Your personal strategist is reviewing the content..."):
+#                             feedback = get_pre_upload_feedback(review_transcript, review_title, review_header, review_audience, review_model_choice)
+#                         if feedback:
+#                             st.markdown("---")
+#                             st.subheader("📋 Feedback Report")
+#                             st.markdown(feedback)
+#                         else:
+#                             st.error("The review could not be generated.")
+#                     else:
+#                         st.error("Could not transcribe the video.")
+#                 else:
+#                     st.warning("Please fill in the Title and Audience fields.")
+#         
+#         with right_col:
+#             st.markdown("### 📹 Video Preview")
+#             st.video(uploaded_video)
+#             st.caption(f"📁 {uploaded_video.name}")
 
-    if st.button("Generate Headers", type="primary", key="generate_headers_btn"):
-        if all([transcript_input_t4, core_message, peak_moment, audience_tone]):
-            with st.spinner("Gemini is generating powerful headers..."):
-                headers = generate_headers(transcript_input_t4, core_message, peak_moment, audience_tone, model_choice_t4)
-                if headers:
-                    st.markdown("---")
-                    st.subheader("🚀 Suggested Thumbnail Headers")
-                    st.markdown(headers)
-                else:
-                    st.error("Header generation failed.")
-        else:
-            st.warning("Please fill in all fields for the best results.")
-
-# --- TAB 5: PRE-UPLOAD REVIEW ---
-with tab5:
-    st.subheader("🚀 Get a Final Pre-Upload Review")
-    uploaded_video = st.file_uploader("Choose a video file", type=['mp4', 'mov', 'avi'], key="review_video_uploader")
-    
-    if uploaded_video:
-        # Create a two-column layout: Form on left, Video on right
-        left_col, right_col = st.columns([3, 2])
-        
-        with left_col:
-            st.markdown("### 📝 Video Context & Analysis")
-            review_title = st.text_input("Proposed Title", placeholder="e.g., DON'T Make This Freelance Mistake!", key="review_title")
-            review_header = st.text_input("Thumbnail Header Text", placeholder="e.g., THE #1 MISTAKE", key="review_header")
-            review_audience = st.text_input("Target Audience", placeholder="e.g., Aspiring freelancers in India", key="review_audience")
-            review_model_choice = st.selectbox("Choose Gemini Model", ("gemini-1.5-pro-latest", "gemini-1.5-flash-latest"), key="review_model_choice")
-
-            if st.button("🔬 Analyze and Review Short", type="primary", key="get_review_btn"):
-                if review_title and review_audience:
-                    with st.spinner("Transcribing video..."):
-                        video_bytes = uploaded_video.getvalue()
-                        review_transcript = transcribe_uploaded_video(video_bytes)
-                    if review_transcript:
-                        st.success("Transcription complete! Now getting feedback...")
-                        with st.spinner("Your personal strategist is reviewing the content..."):
-                            feedback = get_pre_upload_feedback(review_transcript, review_title, review_header, review_audience, review_model_choice)
-                        if feedback:
-                            st.markdown("---")
-                            st.subheader("📋 Feedback Report")
-                            st.markdown(feedback)
-                        else:
-                            st.error("The review could not be generated.")
-                    else:
-                        st.error("Could not transcribe the video.")
-                else:
-                    st.warning("Please fill in the Title and Audience fields.")
-        
-        with right_col:
-            st.markdown("### 📹 Video Preview")
-            st.video(uploaded_video)
-            st.caption(f"📁 {uploaded_video.name}")
-
-# --- TAB 6: POST-UPLOAD DIAGNOSIS ---
+# --- TAB 5: POST-UPLOAD DIAGNOSIS (COMMENTED OUT) ---
 # Initialize session state variables
-if 'diag_url_input' not in st.session_state:
-    st.session_state.diag_url_input = ""
-if 'diag_video_data' not in st.session_state:
-    st.session_state.diag_video_data = None
-if 'diag_show_form' not in st.session_state:
-    st.session_state.diag_show_form = False
-if 'diag_final_report' not in st.session_state:
-    st.session_state.diag_final_report = None
-if 'avd_value' not in st.session_state:
-    st.session_state.avd_value = 0
-if 'hook_value' not in st.session_state:
-    st.session_state.hook_value = 0
-if 'niche_value' not in st.session_state:
-    st.session_state.niche_value = ""
-
-
-with tab6:
-    st.subheader("📈 Post-Upload Performance Diagnosis")
-    st.markdown("Find out *why* your Short performed the way it did. This tool combines public API data with your private Studio analytics for a precise diagnosis.")
-
-    YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY")
-
-    # --- Fetch Data Function ---
-    def fetch_video_data():
-        url = st.session_state.diag_url_input
-        if not url:
-            st.error("Please enter a YouTube URL.")
-            return
-        
-        video_id = parse_video_id(url)
-        if not video_id:
-            st.error("Invalid YouTube URL.")
-            return
-        
-        try:
-            with st.spinner("Fetching data from YouTube API..."):
-                video_data = get_video_details(YOUTUBE_API_KEY, video_id)
-                if video_data:
-                    st.session_state.diag_video_data = video_data
-                    st.session_state.diag_show_form = True
-                    st.session_state.diag_final_report = None
-                    # Reset form values for new video
-                    st.session_state.avd_value = 0
-                    st.session_state.hook_value = 0
-                    st.session_state.niche_value = ""
-                    st.rerun()
-                else:
-                    st.error("Could not fetch video details. Check URL or API Key.")
-        except Exception as e:
-            st.error(f"Error fetching video data: {str(e)}")
-
-    # --- UI Components ---
-    if not YOUTUBE_API_KEY:
-        st.error("YOUTUBE_API_KEY not found in your .env file. Please add it to use this feature.")
-    else:
-        # URL Input Section
-        st.text_input(
-            "Enter the YouTube Short URL you want to diagnose:",
-            key="diag_url_input"
-        )
-        
-        # Fetch Button
-        if st.button("Fetch Public Data", key="fetch_data_btn"):
-            fetch_video_data()
-
-        # Video Data Display
-        if st.session_state.diag_show_form and st.session_state.diag_video_data:
-            video_data = st.session_state.diag_video_data
-            st.markdown("---")
-            st.subheader(f"Diagnosing: \"{video_data['snippet']['title']}\"")
-            
-            # Metrics Display
-            col1, col2, col3, col4 = st.columns(4)
-            col1.metric("Views", f"{int(video_data['statistics'].get('viewCount', 0)):,}")
-            col2.metric("Likes", f"{int(video_data['statistics'].get('likeCount', 0)):,}")
-            col3.metric("Comments", f"{int(video_data['statistics'].get('commentCount', 0)):,}")
-            
-            # Published Date
-            published_date = video_data['snippet'].get('publishedAt', '')
-            if published_date:
-                from datetime import datetime
-                try:
-                    # Parse the ISO 8601 date format from YouTube API
-                    date_obj = datetime.fromisoformat(published_date.replace('Z', '+00:00'))
-                    formatted_date = date_obj.strftime("%B %d, %Y")
-                    col4.metric("Published", formatted_date)
-                except:
-                    col4.metric("Published", "Unknown")
-            else:
-                col4.metric("Published", "Unknown")
-
-            st.info("Go to this video's analytics in your YouTube Studio and provide the following crucial metrics:")
-
-            # Diagnosis Form Fields (Outside of form for better state persistence)
-            st.markdown("### 📊 Enter Your Analytics Data")
-            
-            # Form fields with proper state management
-            avd_input = st.text_input(
-                "Average View Duration (%)", 
-                help="From 'Audience retention' card. Enter a number (e.g., 14 or 0.14)",
-                key="avd_field"
-            )
-            
-            # Convert text input to number with validation
-            try:
-                avd = float(avd_input) if avd_input else 0
-            except ValueError:
-                avd = 0
-                st.error("Please enter a valid number for Average View Duration")
-            
-            hook_input = st.text_input(
-                "Retention at 3-seconds (%)", 
-                help="Hover over start of retention graph. Enter a number (e.g., 85, 120, 150). Can exceed 100% for very short videos.",
-                key="hook_field"
-            )
-            
-            # Convert text input to number with validation
-            try:
-                hook = float(hook_input) if hook_input else 0
-            except ValueError:
-                hook = 0
-                st.error("Please enter a valid number for Retention")
-            
-            niche = st.text_input(
-                "Channel's primary niche?", 
-                help="e.g., Tech, Comedy, Finance",
-                key="niche_field"
-            )
-
-            # Diagnose Button
-            if st.button("🔬 Diagnose My Short", key="diagnose_btn"):
-                # Generate diagnosis
-                manual_data = {
-                    "avd_percentage": avd, 
-                    "hook_retention": hook, 
-                    "niche": niche
-                }
-                
-                with st.spinner("Strategist is diagnosing the data..."):
-                    model_choice = "gemini-1.5-pro-latest"
-                    report = generate_post_upload_diagnosis(video_data, manual_data, model_choice)
-                    st.session_state.diag_final_report = report
-                    # Keep the form visible after report generation
-                    st.session_state.diag_show_form = True
-                    st.rerun()
-
-        # Display Final Report
-        if st.session_state.diag_final_report:
-            st.markdown("---")
-            st.subheader("📋 Diagnosis & Strategy Report")
-            st.markdown(st.session_state.diag_final_report)
-            
-            col1, col2 = st.columns(2)
-            with col1:
-                if st.button("Clear Report", key="clear_report_btn"):
-                    del st.session_state.diag_final_report
-                    st.rerun()
-            with col2:
-                if st.button("Generate New Report", key="new_report_btn"):
-                    del st.session_state.diag_final_report
-                    st.rerun()
+# if 'diag_url_input' not in st.session_state:
+#     st.session_state.diag_url_input = ""
+# if 'diag_uploaded_video' not in st.session_state:
+#     st.session_state.diag_uploaded_video = None
+# 
+# with tab5:
+#     st.subheader("📈 Diagnose Why Your Short Isn't Performing")
+#     
+#     # Input method selection
+#     input_method_t5 = st.radio("Choose input method:", ("YouTube URL", "Upload Video"), horizontal=True, key="diagnosis_input_method")
+#     
+#     if input_method_t5 == "YouTube URL":
+#         st.session_state.diag_url_input = st.text_input("Enter YouTube Short URL", placeholder="e.g., https://youtube.com/shorts/...", key="diag_url_input")
+#         
+#         if st.button("🔍 Diagnose Performance Issues", type="primary", key="diagnose_url_btn"):
+#             if st.session_state.diag_url_input:
+#                 with st.spinner("Transcribing and analyzing your short..."):
+#                     transcript_text = transcribe_audio_with_whisper(st.session_state.diag_url_input)
+#                     if transcript_text:
+#                         st.success("Transcription complete! Now diagnosing performance issues...")
+#                         with st.spinner("Your personal performance analyst is reviewing the content..."):
+#                             diagnosis_result = diagnose_short_performance(transcript_text, model_choice_t5)
+#                         if diagnosis_result:
+#                             st.markdown("---")
+#                             st.subheader("🔬 Performance Diagnosis Report")
+#                             st.markdown(diagnosis_result)
+#                         else:
+#                             st.error("The diagnosis could not be generated.")
+#                     else:
+#                         st.error("Could not transcribe the video from the URL.")
+#             else:
+#                 st.warning("Please enter a YouTube Short URL.")
+#     else:
+#         st.session_state.diag_uploaded_video = st.file_uploader("Choose a video file", type=['mp4', 'mov', 'avi'], key="diagnosis_video_uploader")
+#         
+#         if st.session_state.diag_uploaded_video:
+#             # Create a two-column layout: Form on left, Video on right
+#             left_col_t5, right_col_t5 = st.columns([3, 2])
+#             
+#             with left_col_t5:
+#                 st.markdown("### 📝 Performance Analysis")
+#                 diag_model_choice = st.selectbox("Choose Gemini Model", ("gemini-1.5-pro-latest", "gemini-1.5-flash-latest"), key="diag_model_choice")
+#                 
+#                 if st.button("🔍 Diagnose Performance Issues", type="primary", key="diagnose_upload_btn"):
+#                     with st.spinner("Transcribing video..."):
+#                         video_bytes = st.session_state.diag_uploaded_video.getvalue()
+#                         diag_transcript = transcribe_uploaded_video(video_bytes)
+#                     if diag_transcript:
+#                         st.success("Transcription complete! Now diagnosing performance issues...")
+#                         with st.spinner("Your personal performance analyst is reviewing the content..."):
+#                             diagnosis_result = diagnose_short_performance(diag_transcript, diag_model_choice)
+#                         if diagnosis_result:
+#                             st.markdown("---")
+#                             st.subheader("🔬 Performance Diagnosis Report")
+#                             st.markdown(diagnosis_result)
+#                         else:
+#                             st.error("The diagnosis could not be generated.")
+#                     else:
+#                         st.error("Could not transcribe the video.")
+#             
+#             with right_col_t5:
+#                 st.markdown("### 📹 Video Preview")
+#                 st.video(st.session_state.diag_uploaded_video)
+#                 st.caption(f"📁 {st.session_state.diag_uploaded_video.name}")
