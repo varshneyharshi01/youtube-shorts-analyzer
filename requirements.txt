@@ -5,3 +5,4 @@ openai-whisper
 pandas
 python-dotenv
 ffmpeg-python
+google-api-python-client

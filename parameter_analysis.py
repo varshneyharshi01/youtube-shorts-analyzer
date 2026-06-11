@@ -14,6 +14,6 @@ Give me a list of **at least 20-30** such parameters from this text:
 
 {text_chunk}
 """
-    model = genai.GenerativeModel("gemini-1.5-pro-latest")
+    model = genai.GenerativeModel("gemini-3.1-pro-preview")
     response = model.generate_content(prompt)
     return response.text

@@ -1,5 +1,6 @@
 import streamlit as st
 import os
+from typing import Any, cast
 from dotenv import load_dotenv
 import google.generativeai as genai
 import re
@@ -26,13 +27,19 @@ st.markdown("""
 load_dotenv()
 try:
     if "GEMINI_API_KEY" in os.environ:
-        genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+        genai.configure(api_key=os.getenv("GEMINI_API_KEY"))  # pyright: ignore[reportPrivateImportUsage]
     else:
         st.error("GEMINI_API_KEY not found in your .env file. Please add it to continue.")
         st.stop()
 except Exception as e:
     st.error(f"Failed to configure Gemini API. Please make sure your GEMINI_API_KEY is set correctly. Error: {e}")
     st.stop()
+
+GEMINI_MODELS = ("gemini-3.5-flash", "gemini-3.1-pro-preview")
+
+
+def create_gemini_model(model_name: str):
+    return genai.GenerativeModel(model_name)  # pyright: ignore[reportPrivateImportUsage]
 
 # --- Main App Title ---
 st.title("YouTube Shorts Analyzer 🤖")
@@ -94,18 +101,18 @@ def download_audio_from_youtube(url, output_path="temp_audio"):
     }
     
     try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        with yt_dlp.YoutubeDL(cast(Any, ydl_opts)) as ydl:
             # First, try to get available formats to debug
             try:
                 info = ydl.extract_info(url, download=False)
-                available_formats = info.get('formats', [])
+                available_formats = info.get('formats') or []
                 audio_formats = [f for f in available_formats if f.get('acodec') != 'none']
                 
                 if not audio_formats:
                     st.warning("No audio formats available for this video. Trying alternative approach...")
                     # Fallback to more permissive format selection
                     ydl_opts['format'] = 'bestaudio/best'
-                    with yt_dlp.YoutubeDL(ydl_opts) as ydl2:
+                    with yt_dlp.YoutubeDL(cast(Any, ydl_opts)) as ydl2:
                         ydl2.download([url])
                 else:
                     # Use the original options with available formats
@@ -115,7 +122,7 @@ def download_audio_from_youtube(url, output_path="temp_audio"):
                 st.warning(f"Format detection failed, trying fallback: {format_error}")
                 # Ultimate fallback - try any available format
                 ydl_opts['format'] = 'best'
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl3:
+                with yt_dlp.YoutubeDL(cast(Any, ydl_opts)) as ydl3:
                     ydl3.download([url])
         
         # Check if the file was created
@@ -169,15 +176,17 @@ def transcribe_audio_with_whisper(video_url):
     os.remove(audio_file)
 
     srt_content = []
-    for i, segment in enumerate(result['segments'], 1):
-        start_time = format_timestamp(segment['start'])
-        end_time = format_timestamp(segment['end'])
-        text = segment['text'].strip()
+    segments = cast(list[dict[str, Any]], result.get("segments") or [])
+    for i, segment in enumerate(segments, 1):
+        start_time = format_timestamp(segment["start"])
+        end_time = format_timestamp(segment["end"])
+        text = segment["text"].strip()
         srt_content.append(f"{i}\n{start_time} --> {end_time}\n{text}\n")
     return "\n".join(srt_content)
 
 def transcribe_uploaded_video(video_file_bytes):
     """Saves uploaded video bytes to a temporary file and transcribes it."""
+    temp_video_path = ""
     try:
         with tempfile.NamedTemporaryFile(delete=False, suffix='.mp4') as tmp:
             tmp.write(video_file_bytes)
@@ -186,11 +195,13 @@ def transcribe_uploaded_video(video_file_bytes):
         model = load_whisper_model()
         result = model.transcribe(temp_video_path, fp16=False)
         os.remove(temp_video_path)
-        full_text = " ".join([segment['text'].strip() for segment in result['segments']])
+        temp_video_path = ""
+        segments = cast(list[dict[str, Any]], result.get("segments") or [])
+        full_text = " ".join([segment["text"].strip() for segment in segments])
         return full_text
     except Exception as e:
         st.error(f"Failed during transcription: {e}")
-        if 'temp_video_path' in locals() and os.path.exists(temp_video_path):
+        if temp_video_path and os.path.exists(temp_video_path):
             os.remove(temp_video_path)
         return None
 
@@ -216,8 +227,9 @@ def generate_context_from_transcript(transcript, model_name):
     {transcript}
     ---
     """
+    response = None
     try:
-        model = genai.GenerativeModel(model_name)
+        model = create_gemini_model(model_name)
         response = model.generate_content(prompt)
         # Clean the response to ensure it's a valid JSON string
         clean_json_str = response.text.strip().replace("```json", "").replace("```", "")
@@ -226,7 +238,8 @@ def generate_context_from_transcript(transcript, model_name):
         return context_dict
     except Exception as e:
         st.error(f"An error occurred during context generation (JSON parsing failed): {e}")
-        st.text_area("Failed AI Response:", response.text if 'response' in locals() else "No response from AI.", height=150)
+        failed_response = response.text if response is not None else "No response from AI."
+        st.text_area("Failed AI Response:", failed_response, height=150)
         return None
 def analyze_transcript_for_clips(transcript, model_name, num_clips, chunk_size, progress_bar=None):
     """Analyzes a transcript to find viral clips with smart selection across entire content."""
@@ -343,7 +356,7 @@ def find_potential_clips_in_chunk(chunk, model_name, chunk_num, total_chunks):
     """
     
     try:
-        model = genai.GenerativeModel(model_name)
+        model = create_gemini_model(model_name)
         response = model.generate_content(prompt)
         
         if response.text and '|' in response.text:
@@ -425,7 +438,7 @@ def select_best_clips_from_all(all_potential_clips, target_clips, model_name):
     """
     
     try:
-        model = genai.GenerativeModel(model_name)
+        model = create_gemini_model(model_name)
         response = model.generate_content(prompt)
         
         if response.text and '|' in response.text:
@@ -549,7 +562,7 @@ def select_strongest_clips(clips_markdown, model_name, num_top_clips):
     ---
     """
     try:
-        model = genai.GenerativeModel(model_name)
+        model = create_gemini_model(model_name)
         response = model.generate_content(prompt)
         return response.text
     except Exception as e:
@@ -586,7 +599,7 @@ def analyze_viral_patterns(transcripts_str, model_name):
     {transcripts_str}
     """
     try:
-        model = genai.GenerativeModel(model_name)
+        model = create_gemini_model(model_name)
         response = model.generate_content(prompt)
         return response.text
     except Exception as e:
@@ -626,7 +639,7 @@ def generate_shorts_titles(generated_context, strategy_params, model_name):
     Your final output must be ONLY a Markdown table with two columns: "Strategy" and "Suggested Title". Do not include any other text, explanation, or introduction.
     """
     try:
-        model = genai.GenerativeModel(model_name)
+        model = create_gemini_model(model_name)
         response = model.generate_content(prompt)
         return response.text
     except Exception as e:
@@ -669,7 +682,7 @@ def generate_headers(transcript, core_message, peak_moment, audience_tone, model
     {transcript}
     """
     try:
-        model = genai.GenerativeModel(model_name)
+        model = create_gemini_model(model_name)
         response = model.generate_content(prompt)
         return response.text
     except Exception as e:
@@ -730,7 +743,7 @@ INSTRUCTIONS:
 Your final output must be ONLY a Markdown table with two columns: "Strategy" and "Suggested Header". Do not include any other text, preamble, or explanation.
 """
     try:
-        model = genai.GenerativeModel(model_name)
+        model = create_gemini_model(model_name)
         response = model.generate_content(prompt)
         return response.text
     except Exception as e:
@@ -789,7 +802,7 @@ def get_pre_upload_feedback(short_transcript, title, header, audience, model_nam
     End with a short, encouraging summary paragraph about the video's potential.
     """
     try:
-        model = genai.GenerativeModel(model_name)
+        model = create_gemini_model(model_name)
         safety_settings = [{"category": c, "threshold": "BLOCK_NONE"} for c in ["HARM_CATEGORY_HARASSMENT", "HARM_CATEGORY_HATE_SPEECH", "HARM_CATEGORY_SEXUALLY_EXPLICIT", "HARM_CATEGORY_DANGEROUS_CONTENT"]]
         response = model.generate_content(prompt, safety_settings=safety_settings)
         return response.text
@@ -856,7 +869,7 @@ def generate_post_upload_diagnosis(video_data, manual_data, model_name):
     End with a short, encouraging summary paragraph about the video's potential.
     """
     try:
-        model = genai.GenerativeModel(model_name)
+        model = create_gemini_model(model_name)
         response = model.generate_content(prompt)
         return response.text
     except Exception as e:
@@ -867,7 +880,7 @@ def parse_markdown_table(markdown_text):
     """Parses a Markdown table into a Pandas DataFrame."""
     if not markdown_text: return pd.DataFrame()
     lines = [line for line in markdown_text.strip().split('\n') if '|' in line and '---' not in line]
-    if not lines: return pd.DataFrame(columns=header)
+    if not lines: return pd.DataFrame()
     header = [h.strip() for h in lines[0].split('|') if h.strip()]
     data = [[r.strip() for r in line.split('|') if r.strip()] for line in lines[1:]]
     data = [row for row in data if len(row) == len(header)]
@@ -957,7 +970,7 @@ with tab1:
         st.subheader("Step 1: Find All Potential Clips")
         col1, col2, col3 = st.columns(3)
         num_clips = col1.number_input("Number of clip ideas to find", 3, 50, 7, 1, key="num_clips_input")
-        model_choice_t1 = col2.selectbox("Choose Model", ("gemini-1.5-flash-latest", "gemini-1.5-pro-latest"), key="model_choice_t1", help="Flash is faster. Pro provides more detailed analysis.")
+        model_choice_t1 = col2.selectbox("Choose Model", GEMINI_MODELS, key="model_choice_t1", help="3.5 Flash is faster. 3.1 Pro provides deeper analysis.")
         chunk_size = col3.number_input("Chunk size (minutes)", 5, 20, 10, 1, key="chunk_size_input", help="Smaller chunks = better coverage of long transcripts. For 26+ min videos, use 5-8 minutes.")
         
         # Show chunk size recommendations for long transcripts
@@ -1051,7 +1064,7 @@ with tab1:
 #     col1.button("Add URL ➕", on_click=add_url_input, use_container_width=True)
 #     col2.button("Remove Last ➖", on_click=remove_url_input, use_container_width=True, disabled=(st.session_state.num_url_inputs <= 1))
 # 
-#     model_choice_t2 = st.selectbox("Choose Gemini Model", ("gemini-1.5-flash-latest", "gemini-1.5-pro-latest"), key="model_choice_tab2")
+#     model_choice_t2 = st.selectbox("Choose Gemini Model", GEMINI_MODELS, key="model_choice_tab2")
 # 
 #     if st.button("Find Patterns from Transcripts", type="primary", key="find_patterns_btn"):
 #         valid_urls = [st.session_state.get(f"url_{i}") for i in range(st.session_state.num_url_inputs) if st.session_state.get(f"url_{i}")]
@@ -1104,7 +1117,7 @@ with tab3:
                 takeaway = st.text_input("Main Takeaway or Message", placeholder="e.g., Build a personal brand to earn more", key="takeaway_t3_video")
                 core_message = st.text_input("Core Message (for headers)", placeholder="e.g., The importance of networking", key="core_message_t3_video")
                 peak_moment = st.text_input("Peak Moment / Hook (for headers)", placeholder="e.g., 'I got my dream job from one conversation.'", key="peak_moment_t3_video")
-                model_choice_t3 = st.selectbox("Choose Gemini Model", ("gemini-1.5-pro-latest", "gemini-1.5-flash-latest"), key="model_choice_tab3_video")
+                model_choice_t3 = st.selectbox("Choose Gemini Model", GEMINI_MODELS, key="model_choice_tab3_video")
                 
                 if st.button("🚀 Generate Titles & Headers from Video", type="primary", key="generate_titles_headers_video_btn"):
                     if audience and takeaway and core_message and peak_moment:
@@ -1174,7 +1187,7 @@ with tab3:
         takeaway = col1.text_input("Main Takeaway or Message", placeholder="e.g., Build a personal brand to earn more", key="takeaway_t3_text")
         core_message = col2.text_input("Core Message (for headers)", placeholder="e.g., The importance of networking", key="core_message_t3_text")
         peak_moment = col2.text_input("Peak Moment / Hook (for headers)", placeholder="e.g., 'I got my dream job from one conversation.'", key="peak_moment_t3_text")
-        model_choice_t3 = st.selectbox("Choose Gemini Model", ("gemini-1.5-pro-latest", "gemini-1.5-flash-latest"), key="model_choice_tab3_text")
+        model_choice_t3 = st.selectbox("Choose Gemini Model", GEMINI_MODELS, key="model_choice_tab3_text")
         
         if st.button("🚀 Generate Titles & Headers from Transcript", type="primary", key="generate_titles_headers_text_btn"):
             if transcript_input_t3 and audience and takeaway and core_message and peak_moment:
@@ -1232,7 +1245,7 @@ with tab3:
 #             review_title = st.text_input("Proposed Title", placeholder="e.g., DON'T Make This Freelance Mistake!", key="review_title")
 #             review_header = st.text_input("Thumbnail Header Text", placeholder="e.g., THE #1 MISTAKE", key="review_header")
 #             review_audience = st.text_input("Target Audience", placeholder="e.g., Aspiring freelancers in India", key="review_audience")
-#             review_model_choice = st.selectbox("Choose Gemini Model", ("gemini-1.5-pro-latest", "gemini-1.5-flash-latest"), key="review_model_choice")
+#             review_model_choice = st.selectbox("Choose Gemini Model", GEMINI_MODELS, key="review_model_choice")
 # 
 #             if st.button("🔬 Analyze and Review Short", type="primary", key="get_review_btn"):
 #                 if review_title and review_audience:
@@ -1302,7 +1315,7 @@ with tab3:
 #             
 #             with left_col_t5:
 #                 st.markdown("### 📝 Performance Analysis")
-#                 diag_model_choice = st.selectbox("Choose Gemini Model", ("gemini-1.5-pro-latest", "gemini-1.5-flash-latest"), key="diag_model_choice")
+#                 diag_model_choice = st.selectbox("Choose Gemini Model", GEMINI_MODELS, key="diag_model_choice")
 #                 
 #                 if st.button("🔍 Diagnose Performance Issues", type="primary", key="diagnose_upload_btn"):
 #                     with st.spinner("Transcribing video..."):
